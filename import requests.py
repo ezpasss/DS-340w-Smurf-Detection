@@ -1,73 +1,150 @@
-import requests
-import json
 import time
+import random
+import json
+import os
+import signal
+import sys
+from riotwatcher import LolWatcher, ApiError
 
 # --- CONFIGURATION ---
-API_KEY = "RGAPI-6035c577-d04f-4ace-b1ab-83a2f5935dbf"  # <--- PASTE YOUR KEY AGAIN
-REGION = "na1"
+API_KEY = 'RGAPI-6be47dac-4559-4c68-b516-1cbae331c5fa'  # <--- PASTE KEY
+REGION = 'na1'
+OUTPUT_FILE = 'Full_Data.jsonl'
 
-headers = {"X-Riot-Token": API_KEY}
+# How deep to go per player?
+MATCHES_PER_PLAYER = 3  
 
-def get_low_elo(tier, division, page):
-    """Fetch Low Elo players (Bronze)"""
-    url = f"https://{REGION}.api.riotgames.com/lol/league/v4/entries/RANKED_SOLO_5x5/{tier}/{division}"
-    params = {'page': page}
-    resp = requests.get(url, headers=headers, params=params)
-    return resp.json() if resp.status_code == 200 else []
+# Ranks to cycle through (Justice League uses all of them)
+TIERS = ['IRON', 'BRONZE', 'SILVER', 'GOLD', 'PLATINUM', 'EMERALD', 'DIAMOND', 'MASTER', 'GRANDMASTER', 'CHALLENGER']
+DIVISIONS = ['I', 'II', 'III', 'IV']
 
-def get_high_elo(tier):
-    """Fetch High Elo players (Master/Grandmaster)"""
-    url = f"https://{REGION}.api.riotgames.com/lol/league/v4/{tier}leagues/by-queue/RANKED_SOLO_5x5"
-    resp = requests.get(url, headers=headers)
-    return resp.json()['entries'] if resp.status_code == 200 else []
+watcher = LolWatcher(API_KEY)
+seen_match_ids = set()
+running = True
 
-if __name__ == "__main__":
-    targets = []
-    
-    # 1. SCRAPE BRONZE (Aiming for ~1200 candidates)
-    print("--- 1. Scraping Bronze Candidates ---")
-    for div in ["I", "II", "III"]:
-        for page in range(1, 4): # Pages 1-3
-            print(f"   Fetching Bronze {div} - Page {page}...")
-            players = get_low_elo("BRONZE", div, page)
-            
-            for p in players:
-                # FIX: Use .get() because Bronze players might NOT have summonerId anymore
-                s_id = p.get('summonerId')
-                puuid = p.get('puuid')
-                
-                # As long as we have ONE valid ID, we keep them
-                if s_id or puuid:
-                    targets.append({
-                        "id": s_id, 
-                        "puuid": puuid,
-                        "label": "Bronze"
-                    })
-            time.sleep(1.2)
+# --- 1. GRACEFUL SHUTDOWN HANDLER ---
+def signal_handler(sig, frame):
+    global running
+    print("\n\n[!] WAKE UP SIGNAL RECEIVED (Ctrl+C). Finishing current item and saving...")
+    running = False
 
-    # 2. SCRAPE MASTER/GM (Aiming for ~1200 candidates)
-    print("\n--- 2. Scraping High Elo Candidates ---")
-    for tier in ["master", "grandmaster"]:
-        print(f"   Fetching {tier} list...")
-        players = get_high_elo(tier)
+# Register the "Stop" signal
+signal.signal(signal.SIGINT, signal_handler)
+
+# --- 2. LOAD PREVIOUS PROGRESS ---
+if os.path.exists(OUTPUT_FILE):
+    with open(OUTPUT_FILE, 'r') as f:
+        for line in f:
+            try:
+                data = json.loads(line)
+                seen_match_ids.add(data['match_id'])
+            except:
+                pass
+    print(f"Loaded {len(seen_match_ids)} existing matches from database.")
+
+# --- 3. HELPER FUNCTIONS ---
+def get_puuid_robust(summoner_id):
+    try:
+        summ = watcher.summoner.by_id(REGION, summoner_id)
+        return summ['puuid']
+    except ApiError:
+        return None
+
+def get_timeline_25min(match_id):
+    try:
+        timeline = watcher.match.timeline_by_match(REGION, match_id)
+        frames = timeline['info']['frames']
+        if len(frames) < 26: return None # Must be 25 mins+
         
-        for p in players:
-            # High Elo usually has summonerId but NO puuid yet
-            s_id = p.get('summonerId')
-            puuid = p.get('puuid')
+        extracted = []
+        for i in range(26):
+            frame = frames[i]
             
-            if s_id or puuid:
-                targets.append({
-                    "id": s_id,
-                    "puuid": puuid, 
-                    "label": "Challenger" 
-                })
+            # INSTEAD OF PICKING 4 STATS, WE SAVE THE WHOLE THING
+            # We specifically want the 'participantFrames' dictionary
+            # which contains keys "1" through "10" with ALL the data.
+            extracted.append({
+                'minute': i,
+                'participantFrames': frame['participantFrames'] 
+            })
             
-            if len(targets) > 2500: break # Cap total list size
+        return extracted
+    except: return None
 
-    # 3. SAVE
-    with open("player_list.json", "w") as f:
-        json.dump(targets, f)
+# --- 4. THE INFINITE LOOP ---
+print("--- STARTING OVERNIGHT HARVEST (Press Ctrl+C to Stop) ---")
+
+while running:
+    # A. Pick a Random Tier
+    tier = random.choice(TIERS)
+    division = random.choice(DIVISIONS) if tier not in ['MASTER', 'GRANDMASTER', 'CHALLENGER'] else 'I'
     
-    print(f"\n✅ SUCCESS: Found {len(targets)} candidates.")
-    print("-> Run '2_fetch_matches.py' next.")
+    print(f"\n>>> Scavenging {tier} {division}...")
+    
+    try:
+        # B. Get Random Players
+        if tier in ['MASTER', 'GRANDMASTER', 'CHALLENGER']:
+            # Apex tiers
+            if tier == 'MASTER': func = watcher.league.masters_by_queue
+            elif tier == 'GRANDMASTER': func = watcher.league.grandmaster_by_queue
+            else: func = watcher.league.challenger_by_queue
+            entries = func(REGION, 'RANKED_SOLO_5x5')['entries']
+        else:
+            # Standard tiers (Random Page 1-5 to avoid top-of-ladder bias)
+            page = random.randint(1, 5)
+            entries = watcher.league.entries(REGION, 'RANKED_SOLO_5x5', tier, division, page=page)
+        
+        # Shuffle and Pick 5 Players from this rank
+        if not entries: continue
+        random.shuffle(entries)
+        batch = entries[:5] 
+
+        # C. Process This Batch
+        for entry in batch:
+            if not running: break # Stop requested?
+            
+            # Resolve PUUID
+            puuid = entry.get('puuid')
+            if not puuid:
+                puuid = get_puuid_robust(entry['summonerId'])
+            
+            if not puuid: continue
+
+            # Get Matches
+            try:
+                matches = watcher.match.matchlist_by_puuid(REGION, puuid, queue=420, count=MATCHES_PER_PLAYER)
+            except ApiError: continue
+
+            print(f"  > Processing {entry.get('summonerName', 'Player')} ({len(matches)} matches)...")
+
+            # D. Download Timelines
+            for m_id in matches:
+                if not running: break 
+                if m_id in seen_match_ids: continue
+
+                timeline = get_timeline_25min(m_id)
+                
+                if timeline:
+                    # E. Save to Disk IMMEDIATELY
+                    record = {
+                        'match_id': m_id,
+                        'tier': tier,
+                        'division': division,
+                        'timeline': timeline
+                    }
+                    
+                    with open(OUTPUT_FILE, 'a') as f:
+                        f.write(json.dumps(record) + '\n')
+                    
+                    seen_match_ids.add(m_id)
+                    print(f"    + Secured Match {m_id}")
+                
+                time.sleep(1.2) # Rate limit nap
+                
+    except ApiError as e:
+        print(f"  ! API Error (probably rate limit): {e}")
+        time.sleep(10)
+    except Exception as e:
+        print(f"  ! Error: {e}")
+
+print("\n[✓] Script stopped safely. All data saved.")
