@@ -1,163 +1,129 @@
 import json
+import numpy as np
 import os
-import pandas as pd
-import math
 
 # --- CONFIGURATION ---
-DATA_DIR = "data"
-OUTPUT_FILE = "justice_league_dataset_final.csv"
-MAX_MINUTES = 15  # Analyze first 15 minutes (Laning Phase)
+INPUT_FILE = 'Full_Data.jsonl'
+OUTPUT_X = 'X_47.npy'
+OUTPUT_Y = 'y_47.npy'
 
-def extract_features(data, label):
+# The Exact List of 47 Features you provided
+FEATURE_LIST = [
+    'championStats_abilityHaste', 'championStats_abilityPower', 'championStats_armor', 
+    'championStats_armorPen', 'championStats_armorPenPercent', 'championStats_attackDamage', 
+    'championStats_attackSpeed', 'championStats_bonusArmorPenPercent', 'championStats_bonusMagicPenPercent', 
+    'championStats_ccReduction', 'championStats_cooldownReduction', 'championStats_health', 
+    'championStats_healthMax', 'championStats_healthRegen', 'championStats_lifesteal', 
+    'championStats_magicPen', 'championStats_magicPenPercent', 'championStats_magicResist', 
+    'championStats_movementSpeed', 'championStats_omnivamp', 'championStats_physicalVamp', 
+    'championStats_power', 'championStats_powerMax', 'championStats_powerRegen', 
+    'championStats_spellVamp', 'currentGold', 'damageStats_magicDamageDone', 
+    'damageStats_magicDamageDoneToChampions', 'damageStats_magicDamageTaken', 'damageStats_physicalDamageDone', 
+    'damageStats_physicalDamageDoneToChampions', 'damageStats_physicalDamageTaken', 'damageStats_totalDamageDone', 
+    'damageStats_totalDamageDoneToChampions', 'damageStats_totalDamageTaken', 'damageStats_trueDamageDone', 
+    'damageStats_trueDamageDoneToChampions', 'damageStats_trueDamageTaken', 'goldPerSecond', 
+    'jungleMinionsKilled', 'level', 'minionsKilled', 'position_x', 
+    'position_y', 'timeEnemySpentControlled', 'totalGold', 'xp'
+]
+
+RANK_MAP = {
+    'IRON': 0, 'BRONZE': 1, 'SILVER': 2, 'GOLD': 3, 'PLATINUM': 4,
+    'EMERALD': 5, 'DIAMOND': 6, 'MASTER': 7, 'GRANDMASTER': 8, 'CHALLENGER': 9
+}
+
+def get_nested_value(data_dict, feature_name):
     """
-    Parses a match JSON into 15 time-series rows with Economy, Combat, and Micro stats.
+    Automatically traverses dictionaries based on underscores.
+    Example: 'championStats_armor' -> data_dict['championStats']['armor']
+    Example: 'totalGold' -> data_dict['totalGold']
     """
-    rows = []
-    
-    # 1. VALIDATION: Skip short games
-    frames = data['info']['frames']
-    if len(frames) <= MAX_MINUTES:
-        return [] 
-
-    # 2. IDENTIFY TARGET PLAYER
-    target_puuid = data['metadata'].get('target_puuid')
-    if not target_puuid: 
-        target_puuid = data['metadata']['participants'][0]
-
     try:
-        pid_index = data['metadata']['participants'].index(target_puuid)
-        pid = pid_index + 1
-    except ValueError:
-        return [] 
-
-    # 3. EXTRACT ROLE (Top, Jungle, Middle, Bottom, Utility)
-    participant_info = data['info']['participants'][pid_index]
-    role = participant_info.get('teamPosition', 'UNKNOWN')
-    if not role: role = 'UNKNOWN'
-
-    # 4. INITIALIZE CUMULATIVE COUNTERS
-    prev_pos = None
-    cum_kills = 0
-    cum_deaths = 0
-    cum_assists = 0
-    cum_wards_placed = 0
-    cum_wards_killed = 0
-
-    # 5. LOOP THROUGH MINUTES 1 TO 15
-    for i in range(1, MAX_MINUTES + 1):
-        frame = frames[i]
-        p_frame = frame['participantFrames'][str(pid)]
-        
-        # --- A. EVENT PROCESSING (KDA / Vision / APM) ---
-        apm_events = 0
-        
-        for event in frame['events']:
-            event_type = event.get('type')
-            actor_id = event.get('participantId')
+        # Handle special case: 'position_x' -> ['position']['x']
+        if feature_name == 'position_x':
+            return float(data_dict.get('position', {}).get('x', 0))
+        if feature_name == 'position_y':
+            return float(data_dict.get('position', {}).get('y', 0))
             
-            # KILLS / DEATHS / ASSISTS
-            if event_type == 'CHAMPION_KILL':
-                if event.get('killerId') == pid:
-                    cum_kills += 1
-                    apm_events += 1
-                if event.get('victimId') == pid:
-                    cum_deaths += 1
-                if pid in event.get('assistingParticipantIds', []):
-                    cum_assists += 1
+        # Handle standard nesting (championStats_armor)
+        if '_' in feature_name:
+            parts = feature_name.split('_')
+            # Assuming 1 level of nesting based on your list
+            category = parts[0] # e.g., championStats
+            key = parts[1]      # e.g., armor
+            return float(data_dict.get(category, {}).get(key, 0))
+            
+        # Handle top-level keys (totalGold, xp, level)
+        else:
+            return float(data_dict.get(feature_name, 0))
+            
+    except (ValueError, TypeError, AttributeError):
+        return 0.0
 
-            # VISION
-            elif event_type == 'WARD_PLACED' and actor_id == pid:
-                cum_wards_placed += 1
-                apm_events += 1
-            elif event_type == 'WARD_KILL' and actor_id == pid:
-                cum_wards_killed += 1
-                apm_events += 1
+def process_47_features():
+    if not os.path.exists(INPUT_FILE):
+        print(f"Error: {INPUT_FILE} not found. Run the RAW scraper first.")
+        return
+
+    X_list = []
+    y_list = []
+
+    print(f"Processing {INPUT_FILE} into 47-Feature Matrix...")
+
+    with open(INPUT_FILE, 'r') as f:
+        for line_num, line in enumerate(f):
+            try:
+                data = json.loads(line)
                 
-            # GENERAL APM
-            elif actor_id == pid:
-                if event_type in ['SKILL_LEVEL_UP', 'ITEM_PURCHASED', 'BUILDING_KILL', 'TURRET_PLATE_DESTROYED', 'ELITE_MONSTER_KILL']:
-                    apm_events += 1
+                if data['tier'] not in RANK_MAP: continue
+                label = RANK_MAP[data['tier']]
+                
+                timeline = data.get('timeline')
+                if not timeline or len(timeline) < 26: continue
 
-        # --- B. MOVEMENT (Micro) ---
-        curr_pos = p_frame.get('position')
-        dist = 0
-        if prev_pos and curr_pos:
-            dist = math.sqrt((curr_pos['x'] - prev_pos['x'])**2 + (curr_pos['y'] - prev_pos['y'])**2)
-        prev_pos = curr_pos
+                # Iterate Players (1-10)
+                for pid in range(1, 11):
+                    seq = []
+                    valid_player = True
+                    
+                    # Iterate Minutes (0-25)
+                    for frame_obj in timeline[:26]:
+                        try:
+                            # Access the raw participant data
+                            p_data = frame_obj['participantFrames'][str(pid)]
+                            
+                            # BUILD THE VECTOR (The 47 Features)
+                            vector = []
+                            for feature in FEATURE_LIST:
+                                val = get_nested_value(p_data, feature)
+                                vector.append(val)
+                            
+                            seq.append(vector)
+                            
+                        except KeyError:
+                            valid_player = False
+                            break
+                    
+                    if valid_player and len(seq) == 26:
+                        X_list.append(seq)
+                        y_list.append(label)
 
-        # --- C. COMBAT STATS (Damage & CC) ---
-        # Riot usually stores these in 'damageStats' inside the frame
-        dmg_stats = p_frame.get('damageStats', {})
-        total_damage = dmg_stats.get('totalDamageDoneToChampions', 0)
-        cc_score = p_frame.get('timeEnemySpentControlled', 0)
+            except json.JSONDecodeError:
+                continue
 
-        # --- D. SAVE ROW ---
-        rows.append({
-            "match_id": data['metadata']['matchId'],
-            "label": label,  # 0 = Bronze, 1 = Challenger
-            "role": role,    # Context for the AI
-            "minute": i,     # Time Step (1..15)
-            
-            # Economy (The Basics)
-            "gold": p_frame['totalGold'],
-            "cs": p_frame['minionsKilled'] + p_frame['jungleMinionsKilled'],
-            "xp": p_frame['xp'],
-            
-            # Combat (The Smurf Indicators)
-            "kills": cum_kills,
-            "deaths": cum_deaths,
-            "assists": cum_assists,
-            "damage_dealt": total_damage, # <--- NEW
-            "cc_score": cc_score,         # <--- NEW
-            
-            # Micro/Macro (The Behavior)
-            "apm": apm_events,
-            "distance_moved": int(dist),
-            "wards_placed": cum_wards_placed,
-            "wards_killed": cum_wards_killed
-        })
-        
-    return rows
+    # Convert to Numpy
+    X = np.array(X_list, dtype=np.float32)
+    y = np.array(y_list, dtype=np.int32)
+
+    print("\n" + "="*40)
+    print("      PROCESSING COMPLETE      ")
+    print("="*40)
+    print(f"Total Samples: {len(y)}")
+    print(f"X Shape: {X.shape} -> (Samples, 26, 47)")
+    print(f"y Shape: {y.shape}")
+    
+    np.save(OUTPUT_X, X)
+    np.save(OUTPUT_Y, y)
+    print(f"[✓] Saved files with 47 features.")
 
 if __name__ == "__main__":
-    all_data = []
-    print(f"--- Processing Dataset (Features: Damage, CC, Role, KDA) ---")
-
-    for label_name in ["Bronze", "Challenger"]:
-        folder_path = os.path.join(DATA_DIR, label_name)
-        numeric_label = 1 if label_name == "Challenger" else 0
-        
-        if not os.path.exists(folder_path):
-            print(f"⚠️ Warning: Folder '{folder_path}' not found.")
-            continue
-            
-        print(f"Reading {label_name} matches...")
-        
-        files = os.listdir(folder_path)
-        count = 0
-        
-        for filename in files:
-            if not filename.endswith(".json"): continue
-            
-            file_path = os.path.join(folder_path, filename)
-            try:
-                with open(file_path, "r", encoding='utf-8') as f:
-                    match_data = json.load(f)
-                    
-                new_rows = extract_features(match_data, numeric_label)
-                if new_rows:
-                    all_data.extend(new_rows)
-                    count += 1
-            except: pass
-
-        print(f"   -> Processed {count} matches.")
-
-    if all_data:
-        df = pd.DataFrame(all_data)
-        df.to_csv(OUTPUT_FILE, index=False)
-        print(f"\n✅ SUCCESS! Final dataset saved to: {OUTPUT_FILE}")
-        print(f"   Total Rows: {len(df)}")
-        print(f"   Unique Matches: {df['match_id'].nunique()}")
-        print(f"   Columns: {list(df.columns)}")
-    else:
-        print("\n❌ Error: No data found. Make sure Script 2 downloaded files!")
+    process_47_features()
