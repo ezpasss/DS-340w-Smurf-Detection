@@ -142,8 +142,26 @@ def auc_over_time(model, X, y_bin, kernel_size=3, pool_size=2):
     for m in range(1, T_out + 1):
         auc_by_min[m - 1] = roc_auc_score(y_true[:, :m].reshape(-1), y_pred[:, :m].reshape(-1))
     return auc_by_min
-
+#############################################################
 if __name__ == "__main__":
+    FEATURE_LIST = [
+    'championStats_abilityHaste', 'championStats_abilityPower', 'championStats_armor', 
+    'championStats_armorPen', 'championStats_armorPenPercent', 'championStats_attackDamage', 
+    'championStats_attackSpeed', 'championStats_bonusArmorPenPercent', 'championStats_bonusMagicPenPercent', 
+    'championStats_ccReduction', 'championStats_cooldownReduction', 'championStats_health', 
+    'championStats_healthMax', 'championStats_healthRegen', 'championStats_lifesteal', 
+    'championStats_magicPen', 'championStats_magicPenPercent', 'championStats_magicResist', 
+    'championStats_movementSpeed', 'championStats_omnivamp', 'championStats_physicalVamp', 
+    'championStats_power', 'championStats_powerMax', 'championStats_powerRegen', 
+    'championStats_spellVamp', 'currentGold', 'damageStats_magicDamageDone', 
+    'damageStats_magicDamageDoneToChampions', 'damageStats_magicDamageTaken', 'damageStats_physicalDamageDone', 
+    'damageStats_physicalDamageDoneToChampions', 'damageStats_physicalDamageTaken', 'damageStats_totalDamageDone', 
+    'damageStats_totalDamageDoneToChampions', 'damageStats_totalDamageTaken', 'damageStats_trueDamageDone', 
+    'damageStats_trueDamageDoneToChampions', 'damageStats_trueDamageTaken', 'goldPerSecond', 
+    'jungleMinionsKilled', 'level', 'minionsKilled', 'position_x', 
+    'position_y', 'timeEnemySpentControlled', 'totalGold', 'xp'
+]
+
     all_data = []
     x_data = np.load("X_47.npy")
     print(x_data.shape)
@@ -161,7 +179,7 @@ if __name__ == "__main__":
     print(timeline_match.shape)
 
     feature_scores = calculate_feature_score(timeline_match, dtw)
-    print(feature_scores)
+    # print(feature_scores)
     print(feature_scores.shape)
 
 
@@ -247,4 +265,3 @@ if __name__ == "__main__":
     plt.legend()
     plt.grid(True)
     plt.show()
-
