@@ -174,8 +174,8 @@ if __name__ == "__main__":
     'position_y', 'timeEnemySpentControlled', 'totalGold', 'xp']
 
     # load data and split to only take the first 26 min.
-    x_data = np.load("X_47_t60.npy")
-    y_data = np.load("y_47_t60.npy")
+    x_data = np.load("X_47_t60.npy")[:20000, :, :]
+    y_data = np.load("y_47_t60.npy")[:20000]
 
     print(x_data.shape)
     print(y_data.shape)
@@ -255,7 +255,7 @@ if __name__ == "__main__":
         plt.xlim(1, minutes[-1])
         plt.legend()
         plt.grid(True)
-        plt.savefig("alg60_raw_auc_plot.png", dpi=300, bbox_inches="tight")
+        plt.savefig("test60_raw_auc_plot.png", dpi=300, bbox_inches="tight")
         plt.close()
         return auc_curve
     
@@ -333,7 +333,7 @@ if __name__ == "__main__":
         plt.xlim(1, minutes[-1])
         plt.legend()
         plt.grid(True)
-        plt.savefig("alg60_cut_auc_plot.png", dpi=300, bbox_inches="tight")
+        plt.savefig("test60_cut_auc_plot.png", dpi=300, bbox_inches="tight")
         plt.close()
         return auc_curve
     
@@ -408,7 +408,7 @@ if __name__ == "__main__":
         plt.xlim(1, minutes[-1])
         plt.legend()
         plt.grid(True)
-        plt.savefig("alg60_pool_auc_plot.png", dpi=300, bbox_inches="tight")
+        plt.savefig("test60_pool_auc_plot.png", dpi=300, bbox_inches="tight")
         plt.close()
         return auc_curve
     
@@ -446,142 +446,7 @@ if __name__ == "__main__":
     plt.title("AUC"); plt.xlabel("Elapsed Time (minute)"); plt.ylabel("Probability")
     plt.ylim(0.5, 1.0); plt.xlim(0, MAX_MIN)
     plt.legend(); plt.grid(True)
-    plt.savefig("alg60_combined_auc_plot.png", dpi=300, bbox_inches="tight")
+    plt.savefig("test60_combined_auc_plot.png", dpi=300, bbox_inches="tight")
     plt.show()
 
 
-
-
-
-###############################################################################
-    # teirs = len(np.unique(y_data))
-
-    # N, T, F = x_data.shape
-    # timeline_match = np.zeros((teirs, N, T, F), dtype=x_data.dtype)
-
-    # for j in range(N):
-    #     tier = y_data[j]
-    #     timeline_match[tier, j, :, :] = x_data[j]
-    # print(timeline_match.shape)
-
-    # feature_scores = calculate_feature_score(timeline_match, dtw)
-    # # print(feature_scores)
-    # print(feature_scores.shape)
-
-
-
-
-
-
-    
-  
-
-
-
-    # np.save("X_train_big.npy", X_train)
-    # np.save("y_train_big.npy", y_train)
-    # np.save("X_test_big.npy", X_test)
-    # np.save("y_test_big.npy", y_test)
-    # np.save("X_val_big.npy", X_val)
-    # np.save("y_val_big.npy", y_val)
-
-
-
-    
-
-
-
-r""" 
- (base) PS C:\Users\rowan\Desktop\Classes\DS 340w\DS-340w-Smurf-Detection> & C:/ProgramData/anaconda3/python.exe "c:/Users/rowan/Desktop/Classes/DS 340w/DS-340w-Smurf-Detection/algs.py"
-2026-02-01 12:48:17.698858: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
-2026-02-01 12:48:19.480770: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
-(175410, 26, 47)
-(175410,)
-(10, 175410, 26, 47)
-(47, 10)
-High tier count: 32720 / 175410 rate: 0.1865344051080326
-X min/max: -31.0 4231932.0
-X mean/std: 5486.0967 27752.87
-C:\Users\rowan\AppData\Roaming\Python\Python312\site-packages\keras\src\layers\convolutional\base_conv.py:113: UserWarning: Do not pass an `input_shape`/`input_dim` argument to a layer. When using Sequential models, prefer using an `Input(shape)` object as the first layer in the model instead.
-  super().__init__(activity_regularizer=activity_regularizer, **kwargs)
-2026-02-01 12:59:02.107034: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
-To enable the following instructions: SSE3 SSE4.1 SSE4.2 AVX AVX2 AVX512F AVX512_VNNI AVX512_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
-Model: "sequential"
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┓
-┃ Layer (type)                         ┃ Output Shape                ┃         Param # ┃
-┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━┩
-│ conv1d (Conv1D)                      │ (None, None, 512)           │          72,704 │
-├──────────────────────────────────────┼─────────────────────────────┼─────────────────┤
-│ batch_normalization                  │ (None, None, 512)           │           2,048 │
-│ (BatchNormalization)                 │                             │                 │
-├──────────────────────────────────────┼─────────────────────────────┼─────────────────┤
-│ max_pooling1d (MaxPooling1D)         │ (None, None, 512)           │               0 │
-├──────────────────────────────────────┼─────────────────────────────┼─────────────────┤
-│ lstm (LSTM)                          │ (None, None, 256)           │         787,456 │
-├──────────────────────────────────────┼─────────────────────────────┼─────────────────┤
-│ dropout (Dropout)                    │ (None, None, 256)           │               0 │
-├──────────────────────────────────────┼─────────────────────────────┼─────────────────┤
-│ lstm_1 (LSTM)                        │ (None, None, 128)           │         197,120 │
-├──────────────────────────────────────┼─────────────────────────────┼─────────────────┤
-│ dropout_1 (Dropout)                  │ (None, None, 128)           │               0 │
-├──────────────────────────────────────┼─────────────────────────────┼─────────────────┤
-│ lstm_2 (LSTM)                        │ (None, None, 96)            │          86,400 │
-├──────────────────────────────────────┼─────────────────────────────┼─────────────────┤
-│ dropout_2 (Dropout)                  │ (None, None, 96)            │               0 │
-├──────────────────────────────────────┼─────────────────────────────┼─────────────────┤
-│ time_distributed (TimeDistributed)   │ (None, None, 1)             │              97 │
-└──────────────────────────────────────┴─────────────────────────────┴─────────────────┘
- Total params: 1,145,825 (4.37 MB)
- Trainable params: 1,144,801 (4.37 MB)
- Non-trainable params: 1,024 (4.00 KB)
-Epoch 1/100
-3838/3838 ━━━━━━━━━━━━━━━━━━━━ 112s 29ms/step - accuracy: 0.8137 - loss: 0.4465 - val_accuracy: 0.8143 - val_loss: 0.4347
-Epoch 2/100
-3838/3838 ━━━━━━━━━━━━━━━━━━━━ 100s 26ms/step - accuracy: 0.8159 - loss: 0.4245 - val_accuracy: 0.8090 - val_loss: 0.4329
-Epoch 3/100
-3838/3838 ━━━━━━━━━━━━━━━━━━━━ 102s 27ms/step - accuracy: 0.8172 - loss: 0.4174 - val_accuracy: 0.8189 - val_loss: 0.4114
-Epoch 4/100
-3838/3838 ━━━━━━━━━━━━━━━━━━━━ 103s 27ms/step - accuracy: 0.8189 - loss: 0.4122 - val_accuracy: 0.8145 - val_loss: 0.4160
-Epoch 5/100
-3838/3838 ━━━━━━━━━━━━━━━━━━━━ 101s 26ms/step - accuracy: 0.8210 - loss: 0.4072 - val_accuracy: 0.8204 - val_loss: 0.4094
-Epoch 6/100
-3838/3838 ━━━━━━━━━━━━━━━━━━━━ 101s 26ms/step - accuracy: 0.8218 - loss: 0.4030 - val_accuracy: 0.8200 - val_loss: 0.4065
-Epoch 7/100
-3838/3838 ━━━━━━━━━━━━━━━━━━━━ 102s 27ms/step - accuracy: 0.8232 - loss: 0.3997 - val_accuracy: 0.8214 - val_loss: 0.4074
-Epoch 8/100
-3838/3838 ━━━━━━━━━━━━━━━━━━━━ 102s 27ms/step - accuracy: 0.8243 - loss: 0.3959 - val_accuracy: 0.8193 - val_loss: 0.4140
-Epoch 9/100
-3838/3838 ━━━━━━━━━━━━━━━━━━━━ 102s 27ms/step - accuracy: 0.8264 - loss: 0.3923 - val_accuracy: 0.8219 - val_loss: 0.4047
-Epoch 10/100
-3838/3838 ━━━━━━━━━━━━━━━━━━━━ 109s 28ms/step - accuracy: 0.8273 - loss: 0.3888 - val_accuracy: 0.8217 - val_loss: 0.4032
-Epoch 11/100
-3838/3838 ━━━━━━━━━━━━━━━━━━━━ 107s 28ms/step - accuracy: 0.8287 - loss: 0.3865 - val_accuracy: 0.8146 - val_loss: 0.4114
-Epoch 12/100
-3838/3838 ━━━━━━━━━━━━━━━━━━━━ 106s 28ms/step - accuracy: 0.8300 - loss: 0.3827 - val_accuracy: 0.8199 - val_loss: 0.4213
-Epoch 13/100
-3838/3838 ━━━━━━━━━━━━━━━━━━━━ 106s 28ms/step - accuracy: 0.8322 - loss: 0.3787 - val_accuracy: 0.8218 - val_loss: 0.4128
-Epoch 14/100
-3838/3838 ━━━━━━━━━━━━━━━━━━━━ 107s 28ms/step - accuracy: 0.8339 - loss: 0.3753 - val_accuracy: 0.8222 - val_loss: 0.3985
-Epoch 15/100
-3838/3838 ━━━━━━━━━━━━━━━━━━━━ 106s 28ms/step - accuracy: 0.8355 - loss: 0.3713 - val_accuracy: 0.8221 - val_loss: 0.4173
-Epoch 16/100
-3838/3838 ━━━━━━━━━━━━━━━━━━━━ 106s 28ms/step - accuracy: 0.8373 - loss: 0.3673 - val_accuracy: 0.8212 - val_loss: 0.4228
-Epoch 17/100
-3838/3838 ━━━━━━━━━━━━━━━━━━━━ 104s 27ms/step - accuracy: 0.8396 - loss: 0.3633 - val_accuracy: 0.8222 - val_loss: 0.4181
-Epoch 18/100
-3838/3838 ━━━━━━━━━━━━━━━━━━━━ 105s 27ms/step - accuracy: 0.8421 - loss: 0.3585 - val_accuracy: 0.8199 - val_loss: 0.4069
-Epoch 19/100
-3838/3838 ━━━━━━━━━━━━━━━━━━━━ 108s 28ms/step - accuracy: 0.8441 - loss: 0.3537 - val_accuracy: 0.8208 - val_loss: 0.4320
-Test AUC: 0.7854177739987331
-Top 10 features (index -> score):
-41 -> 0.004216632805764675
-12 -> 0.002903253771364689
-29 -> 0.0023104557767510414
-46 -> 0.001957567408680916
-45 -> 0.0018193019786849618
-39 -> 0.0017028233269229531
-32 -> 0.0016835454152897
-42 -> 0.0016491854330524802
-21 -> 0.0015587561065331101
-5 -> 0.0015079252189025283
-(base) PS C:\Users\rowan\Desktop\Classes\DS 340w\DS-340w-Smurf-Detection> """
