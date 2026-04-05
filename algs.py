@@ -34,39 +34,51 @@ def dtw(x, y):
     return dtw_matrix[n][m]
 
 
-def calculate_feature_score(timeline_match, dtw):
-    num_tiers, N, T, F = timeline_match.shape
-    feature_scores = [[0.0 for _ in range(num_tiers)] for _ in range(F)]
+def calculate_feature_score(x_data, y_data, dtw):
+    N, T, F = x_data.shape
+    num_tiers = len(np.unique(y_data))
+    chosen_t=25
 
+    scores = np.zeros((F, num_tiers), dtype=float)
+    tier_idx = [np.where(y_data == i)[0] for i in range(num_tiers)]
+    print(len(tier_idx[0]), 'tier idx shape')
+    print(x_data[tier_idx[0]].shape, 'x data tier idx shape')
+
+    # Step 1: mean_per_tier (num_tiers, T)
     for f in range(F):
-        mean_per_tier = [[0.0 for _ in range(T)] for _ in range(num_tiers)]
-
+        mean_per_tier = np.zeros((num_tiers, chosen_t), dtype=float)
         for i in range(num_tiers):
-            for t in range(T):
-                sum1 = 0.0
-                for j in range(N):
-                    sum1 += timeline_match[i][j][t][f]
-                mean_per_tier[i][t] = sum1 / N
+            mean_per_time = np.zeros(chosen_t, dtype=float)
+            idx = tier_idx[i]
+            for t in range(chosen_t):
+                sum1 = 0
+                count = 0 
+                for game in x_data[idx]:
+                    if game[t, f] != 0.0:  # only consider valid (non-padded) time steps
+                        sum1 += game[t, f]
+                        count += 1
+                # print(sum1, 'sum1 shape')
+                mean_per_time[t] = sum1/count if count > 0 else 0.0
+            # print(i)
+            mean_per_tier[i] = mean_per_time
+        
+        # print(mean_per_tier.shape, 'mean per tier shape')
 
-        cumsum = [[0.0 for _ in range(T)] for _ in range(num_tiers)]
-
+        # Step 2: normalize + cumsum (num_tiers, T)
+        cumsum = np.zeros((num_tiers, chosen_t), dtype=float)
         for i in range(num_tiers):
-            sum_feature = sum(mean_per_tier[i])
-            if sum_feature == 0:
-                continue
-            else:
-                sum2 = 0.0
-                for t in range(T):
-                    sum2 += mean_per_tier[i][t] / sum_feature
-                    cumsum[i][t] = sum2
+            s = mean_per_tier[i].sum()
+            if s != 0:
+                cumsum[i] = np.cumsum(mean_per_tier[i] / s)
 
+        # Step 3: average DTW to all tiers -> feature_scores (num_tiers,)
         for i in range(num_tiers):
             sum3 = 0.0
             for j in range(num_tiers):
                 sum3 += dtw(cumsum[i], cumsum[j])
-            feature_scores[f][i] = sum3 / num_tiers
+            scores[f, i] = sum3 / num_tiers
 
-    return np.array(feature_scores)
+    return scores
 
 #######################################################
 def lcm(a, b):
@@ -130,18 +142,18 @@ def output_timesteps(T, kernel_size=3, pool_size=2):
 def make_timestep_labels(y_bin, T_out):
     return np.repeat(y_bin[:, None], T_out, axis=1)[..., None].astype(np.float32)
 
-def input_perturbation_feature_importance(model, X, noise_std=0.02, seed=42):
-    rng = np.random.default_rng(seed)
-    N, T, F = X.shape
-    base = model.predict(X, verbose=0)
-    scores = np.zeros(F, dtype=np.float64)
-    for f in range(F):
-        Xn = X.copy()
-        noise = rng.normal(0.0, noise_std, size=(N, T)).astype(X.dtype)
-        Xn[:, :, f] = Xn[:, :, f] + noise
-        pred = model.predict(Xn, verbose=0)
-        scores[f] = float(np.mean(np.abs(pred - base)))
-    return scores
+# def input_perturbation_feature_importance(model, X, noise_std=0.02, seed=42):
+#     rng = np.random.default_rng(seed)
+#     N, T, F = X.shape
+#     base = model.predict(X, verbose=0)
+#     scores = np.zeros(F, dtype=np.float64)
+#     for f in range(F):
+#         Xn = X.copy()
+#         noise = rng.normal(0.0, noise_std, size=(N, T)).astype(X.dtype)
+#         Xn[:, :, f] = Xn[:, :, f] + noise
+#         pred = model.predict(Xn, verbose=0)
+#         scores[f] = float(np.mean(np.abs(pred - base)))
+#     return scores
 
 # calculates the AUC over time for plotting 
 def auc_over_time(model, X, y_bin):
@@ -174,8 +186,14 @@ if __name__ == "__main__":
     'position_y', 'timeEnemySpentControlled', 'totalGold', 'xp']
 
     # load data and split to only take the first 26 min.
-    x_data = np.load("X_47_t60.npy")
-    y_data = np.load("y_47_t60.npy")
+    x_data = np.load("X_47_t30.npy")
+    y_data = np.load("y_47_t30.npy")
+    # np.save("X_train_big.npy", X_train)
+    # np.save("y_train_big.npy", y_train)
+    # np.save("X_test_big.npy", X_test)
+    # np.save("y_test_big.npy", y_test)
+    # np.save("X_val_big.npy", X_val)
+    # np.save("y_val_big.npy", y_val)
 
     print(x_data.shape)
     print(y_data.shape)
@@ -255,7 +273,7 @@ if __name__ == "__main__":
         plt.xlim(1, minutes[-1])
         plt.legend()
         plt.grid(True)
-        plt.savefig("alg60_raw_auc_plot.png", dpi=300, bbox_inches="tight")
+        plt.savefig("alg30_raw_auc_plot.png", dpi=300, bbox_inches="tight")
         plt.close()
         return auc_curve
     
@@ -333,7 +351,7 @@ if __name__ == "__main__":
         plt.xlim(1, minutes[-1])
         plt.legend()
         plt.grid(True)
-        plt.savefig("alg60_cut_auc_plot.png", dpi=300, bbox_inches="tight")
+        plt.savefig("alg30_cut_auc_plot.png", dpi=300, bbox_inches="tight")
         plt.close()
         return auc_curve
     
@@ -408,18 +426,58 @@ if __name__ == "__main__":
         plt.xlim(1, minutes[-1])
         plt.legend()
         plt.grid(True)
-        plt.savefig("alg60_pool_auc_plot.png", dpi=300, bbox_inches="tight")
+        plt.savefig("alg30_pool_auc_plot.png", dpi=300, bbox_inches="tight")
         plt.close()
         return auc_curve
     
 
 
     #### ACTUAL RUNNING CODE ####
+    f_idx = FEATURE_LIST.index("minionsKilled")
+
+    tiers = np.unique(y_data)
+    T = x_data.shape[1]
+    plt.figure()
+
+    for tier in tiers:
+        idx = np.where(y_data == tier)[0]
+
+        mean_curve = np.zeros(T, dtype=float)
+
+        for t in range(T):
+            vals = x_data[idx, t, f_idx]
+            valid = vals != 0         # ignore padded zeros
+
+            mean_curve[t] = vals[valid].mean()
 
 
-    raw_auc_curve = raw_model()
-    cut_auc_curve = cut_model()
-    pool_auc_curve = pool_model()
+        plt.plot(mean_curve, label=f"Tier {tier}")
+
+    plt.xlabel("Time")
+    plt.ylabel(f"Mean minionsKilled (ignoring padded zeros)")
+    plt.title(f"Mean minionsKilled per Tier (no padding bias)")
+    plt.legend()
+    plt.show()
+    scores = calculate_feature_score(x_data, y_data, dtw)
+    # print(scores)
+    print(scores.shape)
+    feature_score = scores.mean(axis=1)               # (F,) one score per feature
+    ranked = np.argsort(feature_score)[::-1]          # high = more distinctive
+    top_k = 10
+    print(f"=== Top {top_k} Features ===")
+    for idx in ranked[:top_k]:
+        print(f"{FEATURE_LIST[idx]:45s}  score = {feature_score[idx]:.6f}")
+
+    print("Minion stats")
+    idx = FEATURE_LIST.index("minionsKilled")
+    print("minionsKilled score per tier:", scores[idx])
+    print("minionsKilled overall score:", scores[idx].mean())
+
+    print("################################################")
+
+    # raw_auc_curve = raw_model()
+    # cut_auc_curve = cut_model()
+    # pool_auc_curve = pool_model()
 
     MAX_MIN = 26
     pool_size = 2
@@ -446,7 +504,7 @@ if __name__ == "__main__":
     plt.title("AUC"); plt.xlabel("Elapsed Time (minute)"); plt.ylabel("Probability")
     plt.ylim(0.5, 1.0); plt.xlim(0, MAX_MIN)
     plt.legend(); plt.grid(True)
-    plt.savefig("alg60_combined_auc_plot.png", dpi=300, bbox_inches="tight")
+    plt.savefig("alg30_combined_auc_plot.png", dpi=300, bbox_inches="tight")
     plt.show()
 
 
@@ -478,12 +536,7 @@ if __name__ == "__main__":
 
 
 
-    # np.save("X_train_big.npy", X_train)
-    # np.save("y_train_big.npy", y_train)
-    # np.save("X_test_big.npy", X_test)
-    # np.save("y_test_big.npy", y_test)
-    # np.save("X_val_big.npy", X_val)
-    # np.save("y_val_big.npy", y_val)
+
 
 
 
