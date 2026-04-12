@@ -33,23 +33,76 @@ def dtw(x, y):
 
     return dtw_matrix[n][m]
 
+SPARSITY_THRESHOLD = 0.30  # feature must be nonzero at least 30% of timesteps
 
-def calculate_feature_score(x_data, y_data, dtw):
+def calculate_feature_score_TEST(x_data, y_data, dtw_fn):
     N, T, F = x_data.shape
-    num_tiers = 9  # fixed per algorithm
-
+    num_tiers = 9
     scores = np.zeros((F, num_tiers), dtype=float)
     tier_idx = [np.where(y_data == i)[0] for i in range(num_tiers)]
 
-    for f in range(F):
-        # Step 1: mean per tier over time
+    # Compute sparsity mask once upfront
+    sparsity = (x_data != 0.0).mean(axis=(0, 1))  # shape: (F,)
+    sparse_features = np.where(sparsity < SPARSITY_THRESHOLD)[0]
+    dense_features = np.where(sparsity >= SPARSITY_THRESHOLD)[0]
+    
+    print(f"Skipping {len(sparse_features)} sparse features (<{SPARSITY_THRESHOLD*100:.0f}% nonzero):")
+    for f in sparse_features:
+        print(f"  {FEATURE_LIST[f]:<45} {sparsity[f]*100:.1f}%")
+    print(f"Scoring {len(dense_features)} dense features...")
+
+    for f in dense_features:
+        # Step 1: mean per tier ignoring padding zeros
         mean_per_tier = np.zeros((num_tiers, T), dtype=float)
         for i in range(num_tiers):
             idx = tier_idx[i]
             if len(idx) == 0:
-                continue  # leave as zeros if tier is empty
-            # x_data[idx] shape: (n_users_in_tier, T, F)
-            mean_per_tier[i] = x_data[idx, :, f].mean(axis=0)  # shape: (T,)
+                continue
+            tier_data = x_data[idx, :, f]
+            counts = (tier_data != 0.0).sum(axis=0)
+            sums = tier_data.sum(axis=0)
+            mean_per_tier[i] = np.where(counts > 0, sums / counts, 0.0)
+
+        # Step 2: normalize and cumsum
+        cumsum = np.zeros((num_tiers, T), dtype=float)
+        for i in range(num_tiers):
+            s = mean_per_tier[i].sum()
+            if s != 0:
+                cumsum[i] = np.cumsum(mean_per_tier[i] / s)
+
+        # Step 3: mean DTW distance
+        for i in range(num_tiers):
+            sum3 = 0.0
+            for j in range(num_tiers):
+                sum3 += dtw_fn(cumsum[i], cumsum[j])
+            scores[f, i] = sum3 / num_tiers
+
+    return scores
+
+def calculate_feature_score(X_padded, y_data, dtw_fn, sparsity_threshold=0.30):
+    N, T, F = X_padded.shape
+    present_tiers = np.unique(y_data)
+    num_tiers = len(present_tiers)
+
+    scores = np.zeros((F, num_tiers), dtype=float)
+    tier_idx = [np.where(y_data == i)[0] for i in present_tiers]
+
+    # Compute sparsity per feature and skip sparse ones
+    sparsity = (X_padded != 0.0).mean(axis=(0, 1))  # shape: (F,)
+
+    for f in range(F):
+        if sparsity[f] < sparsity_threshold:
+            continue  # leave scores[f] as zeros
+
+        # Step 1: mean per tier ignoring padding zeros
+        mean_per_tier = np.zeros((num_tiers, T), dtype=float)
+        for i, idx in enumerate(tier_idx):
+            if len(idx) == 0:
+                continue
+            tier_data = X_padded[idx, :, f]
+            counts = (tier_data != 0.0).sum(axis=0)
+            sums   = tier_data.sum(axis=0)
+            mean_per_tier[i] = np.where(counts > 0, sums / counts, 0.0)
 
         # Step 2: normalize and cumsum
         cumsum = np.zeros((num_tiers, T), dtype=float)
@@ -62,10 +115,10 @@ def calculate_feature_score(x_data, y_data, dtw):
         for i in range(num_tiers):
             sum3 = 0.0
             for j in range(num_tiers):
-                sum3 += dtw(cumsum[i], cumsum[j])
+                sum3 += dtw_fn(cumsum[i], cumsum[j])
             scores[f, i] = sum3 / num_tiers
 
-    return scores  # shape: (F, 9)
+    return scores  # shape: (F, num_present_tiers)
 
 #######################################################
 def lcm(a, b):
@@ -173,8 +226,9 @@ if __name__ == "__main__":
     'position_y', 'timeEnemySpentControlled', 'totalGold', 'xp']
 
     # load data and split to only take the first 26 min.
-    x_data = np.load("X_47_t30.npy")
-    y_data = np.load("y_47_t30.npy")
+    x_data = np.load("X_data_no_padding.npy", allow_pickle=True)
+    y_data = np.load("y_data_no_padding.npy")
+    puid_data = np.load("puuid_data_no_padding.npy", allow_pickle=True)
     # np.save("X_train_big.npy", X_train)
     # np.save("y_train_big.npy", y_train)
     # np.save("X_test_big.npy", X_test)
@@ -182,42 +236,40 @@ if __name__ == "__main__":
     # np.save("X_val_big.npy", X_val)
     # np.save("y_val_big.npy", y_val)
 
+    # print(x_data[1])
     print(x_data.shape)
     print(y_data.shape)
 
-    y = (y_data > 5).astype(int)
+    y = (y_data > 3).astype(int)
     print("High tier count:", y.sum(), "/", len(y), "rate:", y.mean())
+    print(y[:20])
 
-    print("X min/max:", x_data.min(), x_data.max())
-    print("X mean/std:", x_data.mean(), x_data.std())
+    # print("X min/max:", x_data.min(), x_data.max())
+    # print("X mean/std:", x_data.mean(), x_data.std())
     
     # code for the raw model that uses data from all matches up to 26 minutes, including those that ended before 26 min.
     def raw_model():
         print('entering raw model function')
 
-        X_train, X_temp, y_train, y_temp = train_test_split(
-            x_data, y, test_size=0.3, random_state=42, stratify=y)
+        F = x_data[0].shape[1]
+        T = max(len(seq) for seq in x_data)
 
+        # Pad to uniform array
+        X_padded_raw = np.zeros((len(x_data), T, F), dtype=np.float32)
+        for i, seq in enumerate(x_data):
+            X_padded_raw[i, :len(seq), :] = seq
+
+        X_train, X_temp, y_train, y_temp = train_test_split(
+            X_padded_raw, y, test_size=0.3, random_state=42, stratify=y)
         X_val, X_test, y_val, y_test = train_test_split(
             X_temp, y_temp, test_size=1/3, random_state=42, stratify=y_temp)
 
-        mean = X_train.mean(axis=(0,1), keepdims=True)
-        std  = X_train.std(axis=(0,1), keepdims=True) + 1e-8
-
-        X_train = (X_train - mean) / std
-        X_val   = (X_val   - mean) / std
-        X_test  = (X_test  - mean) / std
-
-        N, T, F = x_data.shape
-
         T_out = output_timesteps(T, kernel_size=3, pool_size=2)
-        print("T_out:", T_out)
         y_train_seq = make_timestep_labels(y_train, T_out)
         y_val_seq   = make_timestep_labels(y_val,   T_out)
         y_test_seq  = make_timestep_labels(y_test,  T_out)
 
         model = build_play_pattern_model(F, kernel_size=3, pool_size=2)
-        
         model.summary()
         early_stop = EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)
 
@@ -230,23 +282,20 @@ if __name__ == "__main__":
         )
 
         y_pred = model.predict(X_test, verbose=0)
+        # print("y_test_seq shape:", y_test_seq.shape)
+        # print(y_pred[:10])
+        # y_test_seq shape: (321, 28, 1)
+
+
 
         auc = roc_auc_score(y_test_seq.reshape(-1), y_pred.reshape(-1))
         print("Test AUC:", auc)
 
-        # print('Calculating feature importance scores using input_perturbation_feature_importance...')
-        # scores = input_perturbation_feature_importance(model, X_test, noise_std=0.02)
-        # top10 = np.argsort(scores)[::-1][:10]
-        # print("Top 10 features (index -> score):")
-        # for idx in top10:
-        #     print(idx, "->", scores[idx])
-
         auc_curve = auc_over_time(model, X_test, y_test)
-        pool_size=2
+        pool_size = 2
         kernel_size = 3
         effective_minutes = np.minimum((np.arange(1, len(auc_curve) + 1) * pool_size + (kernel_size - 1)), T)
         minutes = effective_minutes
-
 
         plt.figure(figsize=(7, 5))
         plt.plot(minutes, auc_curve, label="raw")
@@ -262,26 +311,30 @@ if __name__ == "__main__":
         plt.grid(True)
         plt.savefig("alg30_raw_auc_plot.png", dpi=300, bbox_inches="tight")
         plt.close()
-        return auc_curve
+        return model, auc_curve
     
     # MODEL USING ONLY CUT DATA (26 minutes OR LONGER)
     def cut_model():
         print('entering cut model function')
-        x_26 = x_data[:,:26,:]
-        valid_steps = np.any(x_26 != 0.0, axis=2)   # (N, 25) boolean
-        lengths = valid_steps.sum(axis=1)           # (N,)
+        # Use totalGold (index 45) as the reliable "is this a real timestep" indicator
+        # Every player always has totalGold > 0 from minute 0
+        gold_idx = FEATURE_LIST.index('totalGold')
+        
+        x_25 = X_padded[:, :25, :]
 
-        mask = lengths == 26                        # must have all 26 minutes real
+        # Count timesteps where totalGold is nonzero — more reliable than any feature
+        real_steps = (x_25[:, :, gold_idx] != 0.0).sum(axis=1)  # (N,)
+        mask = real_steps == 25  # game must have real totalGold for all 25 minutes
 
-        x_26 = x_26[mask]
-        y_26 = y[mask]
+        x_25 = x_25[mask]
+        y_25 = y[mask]
 
-        print("Filtered X:", x_26.shape)
-        print("Filtered y:", y_26.shape)
+        print("Filtered X:", x_25.shape)
+        print("Filtered y:", y_25.shape)
 
 
         X_train, X_temp, y_train, y_temp = train_test_split(
-            x_26, y_26, test_size=0.3, random_state=42, stratify=y_26)
+            x_25, y_25, test_size=0.3, random_state=42, stratify=y_25)
 
         X_val, X_test, y_val, y_test = train_test_split(
             X_temp, y_temp, test_size=1/3, random_state=42, stratify=y_temp)
@@ -293,7 +346,8 @@ if __name__ == "__main__":
         X_val   = (X_val   - mean) / std
         X_test  = (X_test  - mean) / std
 
-        N, T, F = x_26.shape
+        N, T, F = x_25.shape
+        print(f"Shape after filtering for 25-minute sequences: N={N}, T={T}, F={F}")
 
         T_out = output_timesteps(T, kernel_size=3, pool_size=2)
         print("T_out:", T_out)
@@ -340,12 +394,12 @@ if __name__ == "__main__":
         plt.grid(True)
         plt.savefig("alg30_cut_auc_plot.png", dpi=300, bbox_inches="tight")
         plt.close()
-        return auc_curve
+        return model, auc_curve
     
     # code for the pool model that uses pooling to lengthen shorter sequences to 26 minutes.
     def pool_model():
         print('entering pool model function')
-        x_data_pooled = pool_method(x_data, target_size=26)
+        x_data_pooled = pool_method(X_padded, target_size=26)
         print(x_data_pooled.shape, 'after pool model slicing')
 
         X_train, X_temp, y_train, y_temp = train_test_split(
@@ -387,13 +441,6 @@ if __name__ == "__main__":
         auc = roc_auc_score(y_test_seq.reshape(-1), y_pred.reshape(-1))
         print("Test AUC:", auc)
 
-        # print('Calculating feature importance scores using input_perturbation_feature_importance...')
-        # scores = input_perturbation_feature_importance(model, X_test, noise_std=0.02)
-        # top10 = np.argsort(scores)[::-1][:10]
-        # print("Top 10 features (index -> score):")
-        # for idx in top10:
-        #     print(idx, "->", scores[idx])
-
         auc_curve = auc_over_time(model, X_test, y_test)
         pool_size=2
         kernel_size = 3
@@ -415,38 +462,59 @@ if __name__ == "__main__":
         plt.grid(True)
         plt.savefig("alg30_pool_auc_plot.png", dpi=300, bbox_inches="tight")
         plt.close()
-        return auc_curve
+        return model, auc_curve
     
 
 
     #### ACTUAL RUNNING CODE ####
-    f_idx = FEATURE_LIST.index("minionsKilled")
+    F = x_data[0].shape[1]
+    T = max(len(seq) for seq in x_data)
+    X_padded = np.zeros((len(x_data), T, F), dtype=np.float32)
 
-    tiers = np.unique(y_data)
-    T = x_data.shape[1]
-    plt.figure()
+    def padding_bias_check():
+        for i, seq in enumerate(x_data):
+            X_padded[i, :len(seq), :] = seq
 
-    for tier in tiers:
-        idx = np.where(y_data == tier)[0]
+        nonzero_per_timestep = (X_padded != 0.0).mean(axis=(0, 2))  # shape: (T,)
 
-        mean_curve = np.zeros(T, dtype=float)
+        plt.plot(nonzero_per_timestep)
+        plt.xlabel("Timestep (minute)")
+        plt.ylabel("% samples with nonzero data")
+        plt.title("Data density over time — shows where padding kicks in")
+        plt.axhline(0.5, color='red', linestyle='--', label='50% threshold')
+        plt.legend()
+        plt.show()
+    padding_bias_check()
 
-        for t in range(T):
-            vals = x_data[idx, t, f_idx]
-            valid = vals != 0         # ignore padded zeros
 
-            mean_curve[t] = vals[valid].mean()
+    def minions_killed_test():
+        f_idx = FEATURE_LIST.index("minionsKilled")
+
+        tiers = np.unique(y_data)
+        T = X_padded.shape[1]
+        plt.figure()
+
+        for tier in tiers:
+            idx = np.where(y_data == tier)[0]
+            mean_curve = np.zeros(T, dtype=float)
+
+            for t in range(T):
+                vals = X_padded[idx, t, f_idx]
+                valid = vals != 0
+                if valid.any():
+                    mean_curve[t] = vals[valid].mean()
+
+            plt.plot(mean_curve, label=f"Tier {tier}")
+
+        plt.xlabel("Time")
+        plt.ylabel("Mean minionsKilled (ignoring padded zeros)")
+        plt.title("Mean minionsKilled per Tier (no padding bias)")
+        plt.legend()
+        plt.show()
+    minions_killed_test()
 
 
-        plt.plot(mean_curve, label=f"Tier {tier}")
-
-    plt.xlabel("Time")
-    plt.ylabel(f"Mean minionsKilled (ignoring padded zeros)")
-    plt.title(f"Mean minionsKilled per Tier (no padding bias)")
-    plt.legend()
-    plt.show()
-
-    scores = calculate_feature_score(x_data, y_data, dtw)
+    scores = calculate_feature_score(X_padded, y_data, dtw)
     # print(scores)
     print(scores.shape)
     feature_score = scores.mean(axis=1)               # (F,) one score per feature
@@ -461,43 +529,106 @@ if __name__ == "__main__":
     print("minionsKilled score per tier:", scores[idx])
     print("minionsKilled overall score:", scores[idx].mean())
 
+    print(']]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]')
+    # print(f"{'Feature':<45} {'% Nonzero':>10} {'Mean (nonzero)':>15}")
+    # print("-" * 72)
+    # for f_idx, name in enumerate(FEATURE_LIST):
+    #     col = X_padded[:, :, f_idx].flatten()
+    #     nonzero_mask = col != 0.0
+    #     pct_nonzero = nonzero_mask.mean() * 100
+    #     mean_nonzero = col[nonzero_mask].mean() if nonzero_mask.any() else 0.0
+    #     print(f"{name:<45} {pct_nonzero:>9.1f}% {mean_nonzero:>15.2f}")
+
     print("################################################")
+    def model_testing():
 
-    raw_auc_curve = raw_model()
-    cut_auc_curve = cut_model()
-    pool_auc_curve = pool_model()
+        raw_model_trained, raw_auc_curve = raw_model()
+        cut_model_trained, cut_auc_curve = cut_model()
+        pool_model_trained, pool_auc_curve = pool_model()
 
-    MAX_MIN = 26
-    pool_size = 2
-    kernel_size = 3
+        MAX_MIN = 26
+        pool_size = 2
+        kernel_size = 3
 
-    plt.figure(figsize=(7, 5))
+        plt.figure(figsize=(7, 5))
 
-    curves = [("raw", raw_auc_curve), ("cut", cut_auc_curve), ("pool", pool_auc_curve)]
+        curves = [("raw", raw_auc_curve), ("cut", cut_auc_curve), ("pool", pool_auc_curve)]
 
-    for name, auc in curves:
-        auc = np.asarray(auc)
+        for name, auc in curves:
+            auc = np.asarray(auc)
 
-        mins = (np.arange(1, len(auc) + 1) * pool_size + (kernel_size - 1))
-        mask = mins <= MAX_MIN
+            mins = (np.arange(1, len(auc) + 1) * pool_size + (kernel_size - 1))
+            mask = mins <= MAX_MIN
 
-        plt.plot(mins[mask], auc[mask], label=name)
-        plt.scatter(mins[mask][-1], auc[mask][-1], s=35, zorder=5)
-        plt.axhline(auc[mask][-1], ls="--", lw=1, c="k", alpha=0.75)
-        plt.text(mins[mask][0], auc[mask][-1], f"{auc[mask][-1]:.4f}",
-                ha="left", va="bottom", c="k", alpha=0.9)
-
-
-    plt.axvline(MAX_MIN, ls="--", lw=1, c="k", alpha=0.75)
-    plt.title("AUC"); plt.xlabel("Elapsed Time (minute)"); plt.ylabel("Probability")
-    plt.ylim(0.5, 1.0); plt.xlim(0, MAX_MIN)
-    plt.legend(); plt.grid(True)
-    plt.savefig("alg30_combined_auc_plot.png", dpi=300, bbox_inches="tight")
-    plt.show()
+            plt.plot(mins[mask], auc[mask], label=name)
+            plt.scatter(mins[mask][-1], auc[mask][-1], s=35, zorder=5)
+            plt.axhline(auc[mask][-1], ls="--", lw=1, c="k", alpha=0.75)
+            plt.text(mins[mask][0], auc[mask][-1], f"{auc[mask][-1]:.4f}",
+                    ha="left", va="bottom", c="k", alpha=0.9)
 
 
+        plt.axvline(MAX_MIN, ls="--", lw=1, c="k", alpha=0.75)
+        plt.title("AUC"); plt.xlabel("Elapsed Time (minute)"); plt.ylabel("Probability")
+        plt.ylim(0.5, 1.0); plt.xlim(0, MAX_MIN)
+        plt.legend(); plt.grid(True)
+        plt.savefig("alg30_combined_auc_plot.png", dpi=300, bbox_inches="tight")
+        plt.show()
+        return raw_model_trained, cut_model_trained, pool_model_trained
+    
 
 
+    print('################################################################################')
+    # determining if they a smurf
+    def smurf_detection(x_data_test, y_data_test, puid_data_test):
+        raw_model_trained, cut_model_trained, pool_model_trained = model_testing()
+        print('entering smurf detection function')
+
+        X_padded = np.zeros((len(x_data_test), T, F), dtype=np.float32)
+        for i, seq in enumerate(x_data_test):
+            X_padded[i, :len(seq), :] = seq
+
+        raw_pred = raw_model_trained.predict(X_padded, verbose=0)
+
+        cut_pred = cut_model_trained.predict(X_padded, verbose=0)
+
+        x_data_pooled = pool_method(X_padded, target_size=26)
+        pool_pred = pool_model_trained.predict(x_data_pooled, verbose=0)
+
+        raw_pred_prob  = raw_pred[:, -1, 0]
+        cut_pred_prob  = cut_pred[:, -1, 0]
+        pool_pred_prob = pool_pred[:, -1, 0]
+
+        df = pd.DataFrame({
+            "puuid": puid_data_test,
+            "raw_prob": raw_pred_prob,
+            "cut_prob": cut_pred_prob,
+            "pool_prob": pool_pred_prob,
+            "label": y_data_test
+        })
+
+        df_player = df.groupby("puuid", as_index=False).agg({
+        "raw_prob": "mean",
+        "cut_prob": "mean",
+        "pool_prob": "mean",
+        "label": "first"})
+        # smurf = predicted high (1) but actually low (0)
+        df_player["raw_smurf"]  = ((df_player["raw_pred"] == 1) & (df_player["label"] == 0)).astype(int)
+        df_player["cut_smurf"]  = ((df_player["cut_pred"] == 1) & (df_player["label"] == 0)).astype(int)
+        df_player["pool_smurf"] = ((df_player["pool_pred"] == 1) & (df_player["label"] == 0)).astype(int)
+
+        print(df_player.head(3))
+
+        auc_raw  = roc_auc_score(df_player["label"], df_player["raw_prob"])
+        auc_cut  = roc_auc_score(df_player["label"], df_player["cut_prob"])
+        auc_pool = roc_auc_score(df_player["label"], df_player["pool_prob"])
+
+        print("Player-level AUC:")
+        print(auc_raw, auc_cut, auc_pool)
+
+        
+
+
+    smurf_detection(x_data, y, puid_data)
 
 ###############################################################################
     # teirs = len(np.unique(y_data))
