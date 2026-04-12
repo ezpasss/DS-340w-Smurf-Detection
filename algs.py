@@ -36,49 +36,36 @@ def dtw(x, y):
 
 def calculate_feature_score(x_data, y_data, dtw):
     N, T, F = x_data.shape
-    num_tiers = len(np.unique(y_data))
-    chosen_t=25
+    num_tiers = 9  # fixed per algorithm
 
     scores = np.zeros((F, num_tiers), dtype=float)
     tier_idx = [np.where(y_data == i)[0] for i in range(num_tiers)]
-    print(len(tier_idx[0]), 'tier idx shape')
-    print(x_data[tier_idx[0]].shape, 'x data tier idx shape')
 
-    # Step 1: mean_per_tier (num_tiers, T)
     for f in range(F):
-        mean_per_tier = np.zeros((num_tiers, chosen_t), dtype=float)
+        # Step 1: mean per tier over time
+        mean_per_tier = np.zeros((num_tiers, T), dtype=float)
         for i in range(num_tiers):
-            mean_per_time = np.zeros(chosen_t, dtype=float)
             idx = tier_idx[i]
-            for t in range(chosen_t):
-                sum1 = 0
-                count = 0 
-                for game in x_data[idx]:
-                    if game[t, f] != 0.0:  # only consider valid (non-padded) time steps
-                        sum1 += game[t, f]
-                        count += 1
-                # print(sum1, 'sum1 shape')
-                mean_per_time[t] = sum1/count if count > 0 else 0.0
-            # print(i)
-            mean_per_tier[i] = mean_per_time
-        
-        # print(mean_per_tier.shape, 'mean per tier shape')
+            if len(idx) == 0:
+                continue  # leave as zeros if tier is empty
+            # x_data[idx] shape: (n_users_in_tier, T, F)
+            mean_per_tier[i] = x_data[idx, :, f].mean(axis=0)  # shape: (T,)
 
-        # Step 2: normalize + cumsum (num_tiers, T)
-        cumsum = np.zeros((num_tiers, chosen_t), dtype=float)
+        # Step 2: normalize and cumsum
+        cumsum = np.zeros((num_tiers, T), dtype=float)
         for i in range(num_tiers):
             s = mean_per_tier[i].sum()
             if s != 0:
                 cumsum[i] = np.cumsum(mean_per_tier[i] / s)
 
-        # Step 3: average DTW to all tiers -> feature_scores (num_tiers,)
+        # Step 3: mean DTW distance from each tier to all tiers
         for i in range(num_tiers):
             sum3 = 0.0
             for j in range(num_tiers):
                 sum3 += dtw(cumsum[i], cumsum[j])
             scores[f, i] = sum3 / num_tiers
 
-    return scores
+    return scores  # shape: (F, 9)
 
 #######################################################
 def lcm(a, b):
@@ -458,6 +445,7 @@ if __name__ == "__main__":
     plt.title(f"Mean minionsKilled per Tier (no padding bias)")
     plt.legend()
     plt.show()
+
     scores = calculate_feature_score(x_data, y_data, dtw)
     # print(scores)
     print(scores.shape)
@@ -475,9 +463,9 @@ if __name__ == "__main__":
 
     print("################################################")
 
-    # raw_auc_curve = raw_model()
-    # cut_auc_curve = cut_model()
-    # pool_auc_curve = pool_model()
+    raw_auc_curve = raw_model()
+    cut_auc_curve = cut_model()
+    pool_auc_curve = pool_model()
 
     MAX_MIN = 26
     pool_size = 2
