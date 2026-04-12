@@ -10,6 +10,7 @@ from tensorflow.keras.optimizers import RMSprop
 from tensorflow.keras.callbacks import EarlyStopping
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_curve
 import matplotlib.pyplot as plt
 
 # --- CONFIGURATION ---
@@ -583,12 +584,14 @@ if __name__ == "__main__":
         raw_model_trained, cut_model_trained, pool_model_trained = model_testing()
         print('entering smurf detection function')
 
+        F = x_data_test[0].shape[1]
+        T = max(len(seq) for seq in x_data_test)
+
         X_padded = np.zeros((len(x_data_test), T, F), dtype=np.float32)
         for i, seq in enumerate(x_data_test):
             X_padded[i, :len(seq), :] = seq
 
         raw_pred = raw_model_trained.predict(X_padded, verbose=0)
-
         cut_pred = cut_model_trained.predict(X_padded, verbose=0)
 
         x_data_pooled = pool_method(X_padded, target_size=26)
@@ -607,24 +610,33 @@ if __name__ == "__main__":
         })
 
         df_player = df.groupby("puuid", as_index=False).agg({
-        "raw_prob": "mean",
-        "cut_prob": "mean",
-        "pool_prob": "mean",
-        "label": "first"})
-        # smurf = predicted high (1) but actually low (0)
+            "raw_prob": "mean",
+            "cut_prob": "mean",
+            "pool_prob": "mean",
+            "label": "first"
+        })
+
+        fpr, tpr, thresholds = roc_curve(df_player["label"], df_player["raw_prob"])
+        raw_thresh = thresholds[np.argmax(tpr - fpr)]
+
+        fpr, tpr, thresholds = roc_curve(df_player["label"], df_player["cut_prob"])
+        cut_thresh = thresholds[np.argmax(tpr - fpr)]
+
+        fpr, tpr, thresholds = roc_curve(df_player["label"], df_player["pool_prob"])
+        pool_thresh = thresholds[np.argmax(tpr - fpr)]
+
+        df_player["raw_pred"]  = (df_player["raw_prob"] >= raw_thresh).astype(int)
+        df_player["cut_pred"]  = (df_player["cut_prob"] >= cut_thresh).astype(int)
+        df_player["pool_pred"] = (df_player["pool_prob"] >= pool_thresh).astype(int)
+
         df_player["raw_smurf"]  = ((df_player["raw_pred"] == 1) & (df_player["label"] == 0)).astype(int)
         df_player["cut_smurf"]  = ((df_player["cut_pred"] == 1) & (df_player["label"] == 0)).astype(int)
         df_player["pool_smurf"] = ((df_player["pool_pred"] == 1) & (df_player["label"] == 0)).astype(int)
 
+        print("Thresholds:", raw_thresh, cut_thresh, pool_thresh)
         print(df_player.head(3))
 
-        auc_raw  = roc_auc_score(df_player["label"], df_player["raw_prob"])
-        auc_cut  = roc_auc_score(df_player["label"], df_player["cut_prob"])
-        auc_pool = roc_auc_score(df_player["label"], df_player["pool_prob"])
-
-        print("Player-level AUC:")
-        print(auc_raw, auc_cut, auc_pool)
-
+        return df_player
         
 
 
