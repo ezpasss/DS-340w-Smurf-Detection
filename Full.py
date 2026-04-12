@@ -241,14 +241,22 @@ def run_lstm_pipeline(x_data, y_data, puuids):
 
     # ── CUT MODEL (only games with full 25-min data) ──────────────────────────
     print("\n[LSTM] Training CUT model ...")
-    gold_idx   = FEATURE_LIST.index('totalGold')
-    x_25       = X_padded[:, :25, :]
-    real_steps = (x_25[:, :, gold_idx] != 0.0).sum(axis=1)
-    cut_mask   = real_steps == 25
+    gold_idx = FEATURE_LIST.index('totalGold')
+    
+    x_26 = X_padded[:, :26, :]
 
-    x_25_cut = x_25[cut_mask]
+    # Count timesteps where totalGold is nonzero — more reliable than any feature
+    real_steps = (x_26[:, :, gold_idx] != 0.0).sum(axis=1)  # (N,)
+    cut_mask = real_steps == 26  # game must have real totalGold for all 26 minutes
+
+
+
+    x_25_cut = x_26[cut_mask]
     y_25_cut = y_bin[cut_mask]
     pu_25_cut = puuids[cut_mask]
+
+    N, T, F = x_26.shape
+    print(f"Shape after filtering for 25-minute sequences: N={N}, T={T}, F={F}")
 
     idx_cut_all = np.arange(len(x_25_cut))
     idx_ctr, idx_ctmp, y_ctr, y_ctmp = train_test_split(
@@ -293,6 +301,58 @@ def run_lstm_pipeline(x_data, y_data, puuids):
         validation_data=(X_pval, make_timestep_labels(y_val, T_out_pool)),
         epochs=100, batch_size=32, callbacks=[early_stop], verbose=1
     )
+     
+    # ── AUC OVER TIME CHART ───────────────────────────────────────────────────
+    print("\n[LSTM] Generating AUC-over-time chart ...")
+ 
+    def auc_curve_for(model, X_test, y_test, T_out):
+        preds  = model.predict(X_test, verbose=0)[:, :, 0]
+        y_true = make_timestep_labels(y_test, T_out)[:, :, 0]
+        return np.array([
+            roc_auc_score(y_true[:, :m].reshape(-1), preds[:, :m].reshape(-1))
+            for m in range(1, T_out + 1)
+        ])
+ 
+    kernel_size, pool_size = 3, 2
+ 
+    raw_auc  = auc_curve_for(raw_model,  X_padded[idx_test],  y_test,  T_out_raw)
+    cut_auc  = auc_curve_for(cut_model,  X_cte,               y_ctest, T_out_cut)
+    pool_auc = auc_curve_for(pool_model, X_pte,               y_test,  T_out_pool)
+ 
+    def to_minutes(auc_curve, T_model):
+        return np.minimum(
+            (np.arange(1, len(auc_curve) + 1) * pool_size + (kernel_size - 1)),
+            T_model
+        )
+ 
+    raw_min  = to_minutes(raw_auc,  T)
+    cut_min  = to_minutes(cut_auc,  25)
+    pool_min = to_minutes(pool_auc, 26)
+ 
+    import matplotlib.pyplot as plt
+    plt.figure(figsize=(7, 5))
+    for auc_curve, minutes, label, color in [
+        (raw_auc,  raw_min,  "raw",  "tab:blue"),
+        (cut_auc,  cut_min,  "cut",  "tab:orange"),
+        (pool_auc, pool_min, "pool", "tab:green"),
+    ]:
+        plt.plot(minutes, auc_curve, label=label, color=color)
+        plt.axhline(auc_curve[-1], linestyle="--", linewidth=1, color=color, alpha=0.5)
+        plt.text(minutes[0], auc_curve[-1] + 0.003,
+                 f"{auc_curve[-1]:.4f}", ha="left", va="bottom",
+                 color=color, fontsize=9)
+ 
+    plt.title("AUC")
+    plt.xlabel("Elapsed Time (minute)")
+    plt.ylabel("Probability")
+    plt.ylim(0.5, 1.0)
+    plt.xlim(1, max(raw_min[-1], cut_min[-1], pool_min[-1]))
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig("auc_over_time.png", dpi=300, bbox_inches="tight")
+    plt.close()
+    print("[LSTM] AUC chart saved -> auc_over_time.png")
 
     # ── INFERENCE — full dataset for smurf scoring ────────────────────────────
     print("\n[LSTM] Running inference on full dataset ...")

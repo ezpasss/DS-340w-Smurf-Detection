@@ -241,7 +241,7 @@ if __name__ == "__main__":
     print(x_data.shape)
     print(y_data.shape)
 
-    y = (y_data > 3).astype(int)
+    y = (y_data > 4).astype(int)
     print("High tier count:", y.sum(), "/", len(y), "rate:", y.mean())
     print(y[:20])
 
@@ -321,21 +321,21 @@ if __name__ == "__main__":
         # Every player always has totalGold > 0 from minute 0
         gold_idx = FEATURE_LIST.index('totalGold')
         
-        x_25 = X_padded[:, :25, :]
+        x_26 = X_padded[:, :26, :]
 
         # Count timesteps where totalGold is nonzero — more reliable than any feature
-        real_steps = (x_25[:, :, gold_idx] != 0.0).sum(axis=1)  # (N,)
-        mask = real_steps == 25  # game must have real totalGold for all 25 minutes
+        real_steps = (x_26[:, :, gold_idx] != 0.0).sum(axis=1)  # (N,)
+        mask = real_steps == 26  # game must have real totalGold for all 26 minutes
 
-        x_25 = x_25[mask]
-        y_25 = y[mask]
+        x_26 = x_26[mask]
+        y_26 = y[mask]
 
-        print("Filtered X:", x_25.shape)
-        print("Filtered y:", y_25.shape)
+        print("Filtered X:", x_26.shape)
+        print("Filtered y:", y_26.shape)
 
 
         X_train, X_temp, y_train, y_temp = train_test_split(
-            x_25, y_25, test_size=0.3, random_state=42, stratify=y_25)
+            x_26, y_26, test_size=0.3, random_state=42, stratify=y_26)
 
         X_val, X_test, y_val, y_test = train_test_split(
             X_temp, y_temp, test_size=1/3, random_state=42, stratify=y_temp)
@@ -347,7 +347,7 @@ if __name__ == "__main__":
         X_val   = (X_val   - mean) / std
         X_test  = (X_test  - mean) / std
 
-        N, T, F = x_25.shape
+        N, T, F = x_26.shape
         print(f"Shape after filtering for 25-minute sequences: N={N}, T={T}, F={F}")
 
         T_out = output_timesteps(T, kernel_size=3, pool_size=2)
@@ -585,56 +585,94 @@ if __name__ == "__main__":
         print('entering smurf detection function')
 
         F = x_data_test[0].shape[1]
-        T = max(len(seq) for seq in x_data_test)
 
-        X_padded = np.zeros((len(x_data_test), T, F), dtype=np.float32)
+        # --- RAW: pad to T_max just like raw_model training ---
+        T_max = max(len(seq) for seq in x_data_test)
+        X_raw = np.zeros((len(x_data_test), T_max, F), dtype=np.float32)
         for i, seq in enumerate(x_data_test):
-            X_padded[i, :len(seq), :] = seq
+            X_raw[i, :len(seq), :] = seq
+        raw_pred = raw_model_trained.predict(X_raw, verbose=0)
 
-        raw_pred = raw_model_trained.predict(X_padded, verbose=0)
-        cut_pred = cut_model_trained.predict(X_padded, verbose=0)
+        # --- CUT: truncate to 25, skip games shorter than 25 ---
+        cut_indices = [i for i, seq in enumerate(x_data_test) if len(seq) >= 25]
+        X_cut = np.stack([x_data_test[i][:25] for i in cut_indices]).astype(np.float32)
+        cut_pred = cut_model_trained.predict(X_cut, verbose=0)
+        cut_puuids = [puid_data_test[i] for i in cut_indices]
+        cut_labels = [y_data_test[i] for i in cut_indices]
 
+        # --- POOL: rescale every game to exactly 25 ---
         x_data_pooled = pool_method(X_padded, target_size=26)
         pool_pred = pool_model_trained.predict(x_data_pooled, verbose=0)
 
+        # Use last timestep probability as the game-level score
         raw_pred_prob  = raw_pred[:, -1, 0]
         cut_pred_prob  = cut_pred[:, -1, 0]
         pool_pred_prob = pool_pred[:, -1, 0]
 
-        df = pd.DataFrame({
+        # Build per-game dataframes then aggregate to per-player
+        df_raw = pd.DataFrame({
             "puuid": puid_data_test,
             "raw_prob": raw_pred_prob,
+            "label": y_data_test
+        })
+
+        df_cut = pd.DataFrame({
+            "puuid": cut_puuids,
             "cut_prob": cut_pred_prob,
+            "label": cut_labels
+        })
+
+        df_pool = pd.DataFrame({
+            "puuid": puid_data_test,
             "pool_prob": pool_pred_prob,
             "label": y_data_test
         })
 
-        df_player = df.groupby("puuid", as_index=False).agg({
-            "raw_prob": "mean",
-            "cut_prob": "mean",
-            "pool_prob": "mean",
-            "label": "first"
-        })
+        # Aggregate to player level
+        df_raw_p  = df_raw.groupby("puuid",  as_index=False).agg({"raw_prob":  "mean", "label": "first"})
+        df_cut_p  = df_cut.groupby("puuid",  as_index=False).agg({"cut_prob":  "mean", "label": "first"})
+        df_pool_p = df_pool.groupby("puuid", as_index=False).agg({"pool_prob": "mean", "label": "first"})
 
-        fpr, tpr, thresholds = roc_curve(df_player["label"], df_player["raw_prob"])
-        raw_thresh = thresholds[np.argmax(tpr - fpr)]
+        # Merge into one dataframe
+        df_player = df_raw_p.merge(df_cut_p,  on=["puuid", "label"], how="left")
+        df_player = df_player.merge(df_pool_p, on=["puuid", "label"], how="left")
 
-        fpr, tpr, thresholds = roc_curve(df_player["label"], df_player["cut_prob"])
-        cut_thresh = thresholds[np.argmax(tpr - fpr)]
+        # Find optimal threshold per model
+        def get_threshold(labels, probs):
+            fpr, tpr, thresholds = roc_curve(labels, probs)
+            return thresholds[np.argmax(tpr - fpr)]
 
-        fpr, tpr, thresholds = roc_curve(df_player["label"], df_player["pool_prob"])
-        pool_thresh = thresholds[np.argmax(tpr - fpr)]
+        raw_thresh  = get_threshold(df_player["label"], df_player["raw_prob"])
+        pool_thresh = get_threshold(df_player["label"], df_player["pool_prob"])
 
-        df_player["raw_pred"]  = (df_player["raw_prob"] >= raw_thresh).astype(int)
-        df_player["cut_pred"]  = (df_player["cut_prob"] >= cut_thresh).astype(int)
+        # For cut — filter both label and prob together where cut_prob is not NaN
+        cut_mask_valid = df_player["cut_prob"].notna()
+        cut_thresh = get_threshold(
+            df_player.loc[cut_mask_valid, "label"],
+            df_player.loc[cut_mask_valid, "cut_prob"]
+        )
+
+        # Apply cut threshold only to rows where cut_prob exists
+        df_player["cut_pred"] = np.nan
+        df_player.loc[cut_mask_valid, "cut_pred"] = (
+            df_player.loc[cut_mask_valid, "cut_prob"] >= cut_thresh
+        ).astype(int)
+
+        df_player["raw_pred"]  = (df_player["raw_prob"]  >= raw_thresh).astype(int)
+        df_player["cut_pred"]  = (df_player["cut_prob"]  >= cut_thresh).astype(int)
         df_player["pool_pred"] = (df_player["pool_prob"] >= pool_thresh).astype(int)
 
-        df_player["raw_smurf"]  = ((df_player["raw_pred"] == 1) & (df_player["label"] == 0)).astype(int)
-        df_player["cut_smurf"]  = ((df_player["cut_pred"] == 1) & (df_player["label"] == 0)).astype(int)
+        # Smurf = predicted high tier but actually low tier
+        df_player["raw_smurf"]  = ((df_player["raw_pred"]  == 1) & (df_player["label"] == 0)).astype(int)
+        df_player["cut_smurf"]  = ((df_player["cut_pred"]  == 1) & (df_player["label"] == 0)).astype(int)
         df_player["pool_smurf"] = ((df_player["pool_pred"] == 1) & (df_player["label"] == 0)).astype(int)
 
         print("Thresholds:", raw_thresh, cut_thresh, pool_thresh)
         print(df_player.head(3))
+        print("Smurfs found:")
+        print("raw :", df_player["raw_smurf"].sum())
+        print("cut :", df_player["cut_smurf"].sum())
+        print("pool:", df_player["pool_smurf"].sum())
 
         return df_player
         
