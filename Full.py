@@ -38,6 +38,10 @@ from sklearn.metrics import roc_auc_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
+from sklearn.metrics import roc_curve
+
+import os
+os.environ["OMP_NUM_THREADS"] = "9"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SHARED CONFIGURATION
@@ -119,6 +123,70 @@ def load_data():
     print(f"[Data] Loaded {len(x_data)} games for {len(np.unique(puuids))} unique players")
     return x_data, y_data, puuids
 
+# ─────────────────────────────────────────────────────────────────────────────
+# DTW + FEATURE SCORING  (ported from algs.py)
+# ─────────────────────────────────────────────────────────────────────────────
+def dtw(x, y):
+    n, m = len(x), len(y)
+    dtw_matrix = [[float('inf')] * (m + 1) for _ in range(n + 1)]
+    dtw_matrix[0][0] = 0.0
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            cost = abs(x[i - 1] - y[j - 1])
+            dtw_matrix[i][j] = cost + min(
+                dtw_matrix[i - 1][j],
+                dtw_matrix[i][j - 1],
+                dtw_matrix[i - 1][j - 1]
+            )
+    return dtw_matrix[n][m]
+
+
+def calculate_feature_score(X_padded, y_data, dtw_fn, sparsity_threshold=0.30):
+    N, T, F = X_padded.shape
+    present_tiers = np.unique(y_data)
+    num_tiers     = len(present_tiers)
+    scores        = np.zeros((F, num_tiers), dtype=float)
+    tier_idx      = [np.where(y_data == i)[0] for i in present_tiers]
+
+    sparsity = (X_padded != 0.0).mean(axis=(0, 1))   # (F,)
+
+    for f in range(F):
+        if sparsity[f] < sparsity_threshold:
+            continue
+
+        # Step 1: mean per tier ignoring padding zeros
+        mean_per_tier = np.zeros((num_tiers, T), dtype=float)
+        for i, idx in enumerate(tier_idx):
+            if len(idx) == 0:
+                continue
+            tier_data      = X_padded[idx, :, f]
+            counts         = (tier_data != 0.0).sum(axis=0)
+            sums           = tier_data.sum(axis=0)
+            mean_per_tier[i] = np.where(counts > 0, sums / counts, 0.0)
+
+        # Step 2: normalise and cumsum
+        cumsum = np.zeros((num_tiers, T), dtype=float)
+        for i in range(num_tiers):
+            s = mean_per_tier[i].sum()
+            if s != 0:
+                cumsum[i] = np.cumsum(mean_per_tier[i] / s)
+
+        # Step 3: mean DTW distance from each tier to all tiers
+        for i in range(num_tiers):
+            sum3 = 0.0
+            for j in range(num_tiers):
+                sum3 += dtw_fn(cumsum[i], cumsum[j])
+            scores[f, i] = sum3 / num_tiers
+
+    return scores   # (F, num_present_tiers)
+
+
+def print_top_features(scores, label=""):
+    feature_score = scores.mean(axis=1)
+    ranked        = np.argsort(feature_score)[::-1]
+    print(f"\n=== Top 10 Features [{label}] ===")
+    for rank, idx in enumerate(ranked[:10], 1):
+        print(f"  {rank:>2}. {FEATURE_LIST[idx]:<45}  score = {feature_score[idx]:.6f}")
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  METHOD 1 — LSTM PIPELINE
@@ -127,6 +195,8 @@ def load_data():
 def lcm(a, b):
     return a * b // gcd(a, b)
 
+# takes a time series of any length and converts it into a fixed-length time series
+# stretches the match and then samples it down to a fixed number of timesteps
 def pool_method_1d(input_array, target_size):
     x = np.asarray(input_array, dtype=np.float32)
     N = x.shape[0]
@@ -142,7 +212,7 @@ def pool_method_1d(input_array, target_size):
         chunk  = tmp[i * L2:(i + 1) * L2]
         out[i] = 0.0 if (i == 0 and x[0] == 0) else float(chunk.mean())
     return out
-
+# Apply Algorithm 2 along TIME axis for (N, T, F)
 def pool_method(X, target_size):
     X   = np.asarray(X, dtype=np.float32)
     N, T, F = X.shape
@@ -152,16 +222,19 @@ def pool_method(X, target_size):
             out[n, :, f] = pool_method_1d(X[n, :, f], target_size)
     return out
 
+# USED FOR POOL SIZE
+# determines how many timesteps after a Conv1D + Pooling layer
 def output_timesteps(T, kernel_size=3, pool_size=2):
     return (T - (kernel_size - 1)) // pool_size
 
+# puts a the y label on every time step
 def make_timestep_labels(y_bin, T_out):
     return np.repeat(y_bin[:, None], T_out, axis=1)[..., None].astype(np.float32)
 
+# kernel_size is how many time steps it looks at at once and pool size is how many it downsamples/combines
 def build_play_pattern_model(F, kernel_size, pool_size):
     model = Sequential([
-        Conv1D(512, kernel_size=kernel_size, activation='relu',
-               padding='valid', input_shape=(None, F)),
+        Conv1D(512, kernel_size=kernel_size, activation='relu', padding='valid', input_shape=(None, F)),
         BatchNormalization(),
         MaxPooling1D(pool_size=pool_size),
         LSTM(256, return_sequences=True),
@@ -179,6 +252,7 @@ def build_play_pattern_model(F, kernel_size, pool_size):
     )
     return model
 
+# calculates the AUC over time for plotting 
 def auc_over_time(model, X, y_bin):
     y_pred = model.predict(X, verbose=0)[:, :, 0]
     T_out  = y_pred.shape[1]
@@ -203,7 +277,7 @@ def run_lstm_pipeline(x_data, y_data, puuids):
     print("=" * 70)
 
     # Binary high/low tier label
-    y_bin = (y_data > 3).astype(int)
+    y_bin = (y_data > 4).astype(int)
 
     F = x_data[0].shape[1]
     T = max(len(seq) for seq in x_data)
@@ -213,15 +287,19 @@ def run_lstm_pipeline(x_data, y_data, puuids):
     for i, seq in enumerate(x_data):
         X_padded[i, :len(seq), :] = seq
 
-    early_stop = EarlyStopping(monitor="val_loss", patience=5,
-                                restore_best_weights=True)
-
     # ── Train / test split (shared indices so puuids stay aligned) ───────────
     idx_all = np.arange(len(x_data))
     idx_tr, idx_tmp, y_tr, y_tmp = train_test_split(
         idx_all, y_bin, test_size=0.3, random_state=42, stratify=y_bin)
     idx_val, idx_test, y_val, y_test = train_test_split(
         idx_tmp, y_tmp, test_size=1/3, random_state=42, stratify=y_tmp)
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # FEATURE SCORING — run once on the full padded set before any model trains
+    # ─────────────────────────────────────────────────────────────────────────
+    print("\n[LSTM] Computing DTW feature scores (this may take a few minutes) ...")
+    feat_scores = calculate_feature_score(X_padded, y_data, dtw)
+    print_top_features(feat_scores, label="all models")
 
     # ── RAW MODEL ─────────────────────────────────────────────────────────────
     print("\n[LSTM] Training RAW model ...")
@@ -234,10 +312,17 @@ def run_lstm_pipeline(x_data, y_data, puuids):
     raw_model = build_play_pattern_model(F, kernel_size=3, pool_size=2)
     raw_model.summary()
     raw_model.fit(
-        X_tr_raw,  make_timestep_labels(y_tr,  T_out_raw),
+        X_tr_raw, make_timestep_labels(y_tr, T_out_raw),
         validation_data=(X_val_raw, make_timestep_labels(y_val, T_out_raw)),
-        epochs=100, batch_size=32, callbacks=[early_stop], verbose=1
+        epochs=100, batch_size=32,
+        callbacks=[EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)],
+        verbose=1
     )
+
+    raw_pred_test  = raw_model.predict(X_te_raw, verbose=0)           # (N_test, T_out, 1)
+    y_test_seq_raw = make_timestep_labels(y_test, T_out_raw)
+    auc_raw        = roc_auc_score(y_test_seq_raw.reshape(-1), raw_pred_test.reshape(-1))
+    print(f"[LSTM] Test Raw AUC: {auc_raw:.4f}")
 
     # ── CUT MODEL (only games with full 25-min data) ──────────────────────────
     print("\n[LSTM] Training CUT model ...")
@@ -255,8 +340,8 @@ def run_lstm_pipeline(x_data, y_data, puuids):
     y_25_cut = y_bin[cut_mask]
     pu_25_cut = puuids[cut_mask]
 
-    N, T, F = x_26.shape
-    print(f"Shape after filtering for 25-minute sequences: N={N}, T={T}, F={F}")
+    N_cut, T_cut, F_cut = x_25_cut.shape
+    print(f"Shape after filtering for 25-minute sequences: N={N_cut}, T={T_cut}, F={F_cut}")
 
     idx_cut_all = np.arange(len(x_25_cut))
     idx_ctr, idx_ctmp, y_ctr, y_ctmp = train_test_split(
@@ -264,20 +349,25 @@ def run_lstm_pipeline(x_data, y_data, puuids):
     idx_cval, idx_ctest, y_cval, y_ctest = train_test_split(
         idx_ctmp, y_ctmp, test_size=1/3, random_state=42, stratify=y_ctmp)
 
-    mean_c = x_25_cut[idx_ctr].mean(axis=(0, 1), keepdims=True)
-    std_c  = x_25_cut[idx_ctr].std(axis=(0, 1),  keepdims=True) + 1e-8
-    X_ctr  = (x_25_cut[idx_ctr]   - mean_c) / std_c
-    X_cval = (x_25_cut[idx_cval]  - mean_c) / std_c
-    X_cte  = (x_25_cut[idx_ctest] - mean_c) / std_c
+    X_ctr  = x_25_cut[idx_ctr]
+    X_cval = x_25_cut[idx_cval]
+    X_cte  = x_25_cut[idx_ctest]
 
-    T_out_cut = output_timesteps(25, kernel_size=3, pool_size=2)
+    T_out_cut = output_timesteps(T_cut, kernel_size=3, pool_size=2)
     cut_model = build_play_pattern_model(F, kernel_size=3, pool_size=2)
     cut_model.summary()
     cut_model.fit(
-        X_ctr,  make_timestep_labels(y_ctr,  T_out_cut),
+        X_ctr, make_timestep_labels(y_ctr, T_out_cut),
         validation_data=(X_cval, make_timestep_labels(y_cval, T_out_cut)),
-        epochs=100, batch_size=32, callbacks=[early_stop], verbose=1
+        epochs=100, batch_size=32,
+        callbacks=[EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)],
+        verbose=1
     )
+
+    cut_pred_test  = cut_model.predict(X_cte, verbose=0)
+    y_test_seq_cut = make_timestep_labels(y_ctest, T_out_cut)
+    auc_cut        = roc_auc_score(y_test_seq_cut.reshape(-1), cut_pred_test.reshape(-1))
+    print(f"[LSTM] Test Cut AUC: {auc_cut:.4f}")
 
     # ── POOL MODEL ────────────────────────────────────────────────────────────
     print("\n[LSTM] Training POOL model ...")
@@ -288,19 +378,18 @@ def run_lstm_pipeline(x_data, y_data, puuids):
     X_pval = X_pooled[idx_val]
     X_pte  = X_pooled[idx_test]
 
-    mean_p = X_ptr.mean(axis=(0, 1), keepdims=True)
-    std_p  = X_ptr.std(axis=(0, 1),  keepdims=True) + 1e-8
-    X_ptr  = (X_ptr  - mean_p) / std_p
-    X_pval = (X_pval - mean_p) / std_p
-    X_pte  = (X_pte  - mean_p) / std_p
-
     pool_model = build_play_pattern_model(F, kernel_size=3, pool_size=2)
     pool_model.summary()
     pool_model.fit(
         X_ptr,  make_timestep_labels(y_tr,   T_out_pool),
         validation_data=(X_pval, make_timestep_labels(y_val, T_out_pool)),
-        epochs=100, batch_size=32, callbacks=[early_stop], verbose=1
+        epochs=100, batch_size=32, callbacks=[EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)], verbose=1
     )
+
+    pool_pred_test  = pool_model.predict(X_pte, verbose=0)
+    y_test_seq_pool = make_timestep_labels(y_test, T_out_pool)
+    auc_pool        = roc_auc_score(y_test_seq_pool.reshape(-1), pool_pred_test.reshape(-1))
+    print(f"[LSTM] Test Pool AUC: {auc_pool:.4f}")
      
     # ── AUC OVER TIME CHART ───────────────────────────────────────────────────
     print("\n[LSTM] Generating AUC-over-time chart ...")
@@ -313,40 +402,47 @@ def run_lstm_pipeline(x_data, y_data, puuids):
             for m in range(1, T_out + 1)
         ])
  
+    import matplotlib.pyplot as plt
+
+    MAX_MIN = 26
     kernel_size, pool_size = 3, 2
- 
-    raw_auc  = auc_curve_for(raw_model,  X_padded[idx_test],  y_test,  T_out_raw)
-    cut_auc  = auc_curve_for(cut_model,  X_cte,               y_ctest, T_out_cut)
-    pool_auc = auc_curve_for(pool_model, X_pte,               y_test,  T_out_pool)
- 
+
+    raw_auc  = auc_curve_for(raw_model,  X_te_raw, y_test,  T_out_raw)
+    cut_auc  = auc_curve_for(cut_model,  X_cte,    y_ctest, T_out_cut)
+    pool_auc = auc_curve_for(pool_model, X_pte,    y_test,  T_out_pool)
+
     def to_minutes(auc_curve, T_model):
         return np.minimum(
             (np.arange(1, len(auc_curve) + 1) * pool_size + (kernel_size - 1)),
             T_model
         )
- 
+
     raw_min  = to_minutes(raw_auc,  T)
-    cut_min  = to_minutes(cut_auc,  25)
+    cut_min  = to_minutes(cut_auc,  T_cut)
     pool_min = to_minutes(pool_auc, 26)
- 
-    import matplotlib.pyplot as plt
+
     plt.figure(figsize=(7, 5))
     for auc_curve, minutes, label, color in [
         (raw_auc,  raw_min,  "raw",  "tab:blue"),
         (cut_auc,  cut_min,  "cut",  "tab:orange"),
         (pool_auc, pool_min, "pool", "tab:green"),
     ]:
-        plt.plot(minutes, auc_curve, label=label, color=color)
-        plt.axhline(auc_curve[-1], linestyle="--", linewidth=1, color=color, alpha=0.5)
-        plt.text(minutes[0], auc_curve[-1] + 0.003,
-                 f"{auc_curve[-1]:.4f}", ha="left", va="bottom",
-                 color=color, fontsize=9)
- 
+        mask = minutes <= MAX_MIN
+        mins_masked = minutes[mask]
+        auc_masked  = auc_curve[mask]
+
+        plt.plot(mins_masked, auc_masked, label=label, color=color)
+        plt.scatter(mins_masked[-1], auc_masked[-1], s=35, color=color, zorder=5)
+        plt.axhline(auc_masked[-1], linestyle="--", linewidth=1, color=color, alpha=0.75)
+        plt.text(mins_masked[0], auc_masked[-1], f"{auc_masked[-1]:.4f}",
+                 ha="left", va="bottom", color=color, fontsize=9)
+
+    plt.axvline(MAX_MIN, linestyle="--", linewidth=1, color="k", alpha=0.75)
     plt.title("AUC")
     plt.xlabel("Elapsed Time (minute)")
     plt.ylabel("Probability")
     plt.ylim(0.5, 1.0)
-    plt.xlim(1, max(raw_min[-1], cut_min[-1], pool_min[-1]))
+    plt.xlim(0, MAX_MIN)
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
@@ -357,26 +453,75 @@ def run_lstm_pipeline(x_data, y_data, puuids):
     # ── INFERENCE — full dataset for smurf scoring ────────────────────────────
     print("\n[LSTM] Running inference on full dataset ...")
 
-    raw_probs  = raw_model.predict(X_padded, verbose=0)[:, -1, 0]
-    pool_probs = pool_model.predict(
-        pool_method(X_padded, target_size=26), verbose=0)[:, -1, 0]
+    # Raw: predict on all padded games
+    raw_probs_all  = raw_model.predict(X_padded, verbose=0)[:, -1, 0]
 
-    # Cut model: score only the games in the cut subset; fill others with NaN
-    cut_full_probs = np.full(len(x_data), np.nan)
-    cut_scores     = cut_model.predict(
-        (X_padded[cut_mask, :25, :] - mean_c) / std_c, verbose=0)[:, -1, 0]
-    cut_full_probs[cut_mask] = cut_scores
+    # Pool: predict on all pooled games
+    pool_probs_all = pool_model.predict(pool_method(X_padded, target_size=26), verbose=0)[:, -1, 0]
 
-    # Build per-game DataFrame
+    # Cut: predict only where cut_mask is True; fill rest with NaN
+    cut_scores_cut = cut_model.predict(x_25_cut, verbose=0)[:, -1, 0]
+    cut_probs_all  = np.full(len(x_data), np.nan)
+    cut_probs_all[cut_mask] = cut_scores_cut
+
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SMURF DETECTION — optimal ROC thresholds (from algs.py smurf_detection)
+    # ─────────────────────────────────────────────────────────────────────────
+    print("\n[LSTM] Detecting smurfs via optimal ROC thresholds ...")
+
+    # calculates the optimal roc threshold
+    def get_threshold(labels, probs):
+        fpr, tpr, thresholds = roc_curve(labels, probs)
+        return thresholds[np.argmax(tpr - fpr)]
+
+    # Work on test-set game rows so thresholds are found on held-out data
+    df_test_raw  = pd.DataFrame({"prob": raw_probs_all[idx_test],  "label": y_test})
+    df_test_pool = pd.DataFrame({"prob": pool_probs_all[idx_test], "label": y_test})
+
+    # Cut test set maps to cut-subset indices
+    cut_test_probs  = cut_model.predict(X_cte, verbose=0)[:, -1, 0]
+    df_test_cut     = pd.DataFrame({"prob": cut_test_probs, "label": y_ctest})
+
+    raw_thresh  = get_threshold(df_test_raw["label"],  df_test_raw["prob"])
+    pool_thresh = get_threshold(df_test_pool["label"], df_test_pool["prob"])
+    cut_thresh  = get_threshold(df_test_cut["label"],  df_test_cut["prob"])
+    print(f"[LSTM] Thresholds — raw: {raw_thresh:.4f}  cut: {cut_thresh:.4f}  pool: {pool_thresh:.4f}")
+
+    # Build per-game DataFrame for all games
     df_games = pd.DataFrame({
         "puuid":     puuids,
-        "raw_prob":  raw_probs,
-        "cut_prob":  cut_full_probs,   # NaN for games shorter than 25 min
-        "pool_prob": pool_probs,
+        "raw_prob":  raw_probs_all,
+        "cut_prob":  cut_probs_all,    # NaN for games shorter than 26 min
+        "pool_prob": pool_probs_all,
         "rank_id":   y_data,
     })
 
-    # Aggregate per player — average available probabilities
+    # Per-game smurf predictions using per-model thresholds
+    df_games["raw_pred"]  = (df_games["raw_prob"]  >= raw_thresh).astype(int)
+    df_games["pool_pred"] = (df_games["pool_prob"] >= pool_thresh).astype(int)
+    df_games["cut_pred"]  = np.where(
+        df_games["cut_prob"].notna(),
+        (df_games["cut_prob"] >= cut_thresh).astype(int),
+        np.nan
+    )
+
+    # Smurf = predicted high-tier but actually low-tier
+    label_bin = (df_games["rank_id"] > 4).astype(int)
+    df_games["raw_smurf"]  = ((df_games["raw_pred"]  == 1) & (label_bin == 0)).astype(int)
+    df_games["pool_smurf"] = ((df_games["pool_pred"] == 1) & (label_bin == 0)).astype(int)
+    df_games["cut_smurf"]  = np.where(
+        df_games["cut_pred"].notna(),
+        ((df_games["cut_pred"] == 1) & (label_bin == 0)).astype(int),
+        np.nan
+    )
+
+    print(f"[LSTM] Smurfs found (game level) — "
+          f"raw: {df_games['raw_smurf'].sum():.0f}  "
+          f"cut: {df_games['cut_smurf'].sum():.0f}  "
+          f"pool: {df_games['pool_smurf'].sum():.0f}")
+
+    # ── Aggregate to player level ─────────────────────────────────────────────
     def safe_mean(s):
         return s.dropna().mean() if s.notna().any() else np.nan
 
@@ -387,24 +532,25 @@ def run_lstm_pipeline(x_data, y_data, puuids):
         rank_id   =("rank_id",   "median"),
     ).reset_index()
 
-    # Ensemble: mean of available probabilities per player
-    prob_cols = ["raw_prob", "cut_prob", "pool_prob"]
-    df_player["lstm_prob"] = df_player[prob_cols].mean(axis=1)
+    # Ensemble probability: mean of available model probs per player
+    df_player["lstm_prob"] = df_player[["raw_prob", "cut_prob", "pool_prob"]].mean(axis=1)
 
-    # Smurf = predicted high-tier but actually low-tier
+    # Player-level smurf flag: ensemble prob >= mean of the three thresholds, actually low-tier
+    ensemble_thresh = np.mean([raw_thresh, cut_thresh, pool_thresh])
     df_player["lstm_label"] = np.where(
-        (df_player["lstm_prob"] >= LSTM_THRESHOLD) & (df_player["rank_id"] <= 3),
+        (df_player["lstm_prob"] >= ensemble_thresh) & (df_player["rank_id"] <= 4),
         "Smurf", "Honest"
     )
 
     n_smurfs = (df_player["lstm_label"] == "Smurf").sum()
     print(f"[LSTM] {n_smurfs} smurfs detected out of {len(df_player)} players "
-          f"({100 * n_smurfs / len(df_player):.1f}%)")
+          f"({100 * n_smurfs / len(df_player):.1f}%)  "
+          f"[ensemble threshold: {ensemble_thresh:.4f}]")
 
     result = df_player[["puuid", "lstm_prob", "lstm_label"]].copy()
     result.to_csv("smurf_results_lstm.csv", index=False)
     print("[LSTM] Results saved → smurf_results_lstm.csv")
-    return result
+    return result, df_games, {"raw": raw_thresh, "cut": cut_thresh, "pool": pool_thresh}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -546,86 +692,108 @@ def run_kmeans_pipeline(x_data, y_data, puuids):
 #  COMPARISON & REPORTING
 # ═════════════════════════════════════════════════════════════════════════════
 
-def compare_and_report(lstm_df, kmeans_df):
+def compare_and_report(lstm_df, lstm_games_df, lstm_thresholds, kmeans_df):
     """
-    Merge the two verdict DataFrames on puuid and produce a confusion-matrix-
-    style summary showing overlap between the two methods.
+    Produces a confusion-matrix-style cross-model summary for:
+      - RAW model vs KMeans
+      - CUT model vs KMeans
+      - POOL model vs KMeans
+      - LSTM Ensemble vs KMeans
     """
+    from sklearn.metrics import roc_curve
+
     print("\n" + "=" * 70)
     print("  CROSS-MODEL COMPARISON")
     print("=" * 70)
 
-    merged = pd.merge(lstm_df, kmeans_df, on="puuid", how="outer")
+    # ── Build per-player verdicts for each LSTM variant ───────────────────────
+    def safe_mean(s):
+        return s.dropna().mean() if s.notna().any() else np.nan
 
-    # Fill gaps — players only present in one pipeline get "Honest" in the other
-    merged["lstm_label"]   = merged["lstm_label"].fillna("Honest")
-    merged["kmeans_label"] = merged["kmeans_label"].fillna("Honest")
+    def player_label_from_prob(df_games, prob_col, threshold, pred_col):
+        """Aggregate game-level probs to player level, apply threshold, flag smurfs."""
+        df_p = df_games.groupby("puuid").agg(
+            prob    =(prob_col, safe_mean),
+            rank_id =("rank_id", "median"),
+        ).reset_index()
+        df_p[pred_col] = (df_p["prob"] >= threshold).astype(int)
+        label_bin      = (df_p["rank_id"] > 4).astype(int)
+        df_p["label"]  = np.where(
+            (df_p[pred_col] == 1) & (label_bin == 0), "Smurf", "Honest"
+        )
+        return df_p[["puuid", "label"]].rename(columns={"label": pred_col + "_label"})
 
-    # Derived verdict
-    def combined_verdict(row):
-        l = row["lstm_label"]   == "Smurf"
-        k = row["kmeans_label"] == "Smurf"
-        if l and k:
-            return "Confirmed Smurf"
-        elif l:
-            return "LSTM Only"
-        elif k:
-            return "KMeans Only"
-        else:
-            return "Honest"
+    raw_player  = player_label_from_prob(lstm_games_df, "raw_prob",  lstm_thresholds["raw"],  "raw")
+    pool_player = player_label_from_prob(lstm_games_df, "pool_prob", lstm_thresholds["pool"], "pool")
 
-    merged["verdict"] = merged.apply(combined_verdict, axis=1)
+    # Cut: only players who have at least one cut-eligible game get a cut score
+    cut_games   = lstm_games_df[lstm_games_df["cut_prob"].notna()]
+    if len(cut_games) > 0:
+        cut_player = player_label_from_prob(cut_games, "cut_prob", lstm_thresholds["cut"], "cut")
+    else:
+        cut_player = pd.DataFrame(columns=["puuid", "cut_label"])
 
-    # ── Counts ────────────────────────────────────────────────────────────────
-    counts = merged["verdict"].value_counts()
-    total  = len(merged)
+    # ── Helper: single confusion matrix block ─────────────────────────────────
+    def print_confusion(lstm_label_col, model_name, merged):
+        l = merged[lstm_label_col].fillna("Honest") == "Smurf"
+        k = merged["kmeans_label"].fillna("Honest") == "Smurf"
 
-    confirmed  = counts.get("Confirmed Smurf", 0)
-    lstm_only  = counts.get("LSTM Only",       0)
-    kmeans_only= counts.get("KMeans Only",     0)
-    honest     = counts.get("Honest",           0)
+        confirmed   = int(( l &  k).sum())
+        lstm_only   = int(( l & ~k).sum())
+        kmeans_only = int((~l &  k).sum())
+        honest      = int((~l & ~k).sum())
+        total       = len(merged)
 
-    # ── Print summary ─────────────────────────────────────────────────────────
-    sep  = "─" * 54
-    line = f"{'Category':<28} {'Count':>8}  {'% of Players':>12}"
+        sep  = "─" * 54
+        lines = [
+            "",
+            f"╔══════════════════════════════════════════════════════╗",
+            f"║   {model_name:<51}║",
+            f"╚══════════════════════════════════════════════════════╝",
+            "",
+            f"{'Category':<28} {'Count':>8}  {'% of Players':>12}",
+            sep,
+            f"{'Confirmed Smurf (both)':<28} {confirmed:>8}  {100*confirmed/total:>11.1f}%",
+            f"{'Flagged by LSTM only':<28} {lstm_only:>8}  {100*lstm_only/total:>11.1f}%",
+            f"{'Flagged by KMeans only':<28} {kmeans_only:>8}  {100*kmeans_only/total:>11.1f}%",
+            f"{'Honest (neither)':<28} {honest:>8}  {100*honest/total:>11.1f}%",
+            sep,
+            f"{'Total players':<28} {total:>8}",
+            "",
+            f"  Confusion-Matrix View ({model_name} rows × KMeans columns):",
+            "",
+            f"  {'':16}  {'KMeans: Smurf':>14}  {'KMeans: Honest':>15}",
+            f"  {sep}",
+            f"  {'LSTM: Smurf':<16}  {confirmed:>14}  {lstm_only:>15}",
+            f"  {'LSTM: Honest':<16}  {kmeans_only:>14}  {honest:>15}",
+            "",
+        ]
+        text = "\n".join(lines)
+        print(text)
+        return text
 
-    summary_lines = [
-        "",
-        "╔══════════════════════════════════════════════════════╗",
-        "║          SMURF DETECTION — CROSS-MODEL SUMMARY       ║",
-        "╚══════════════════════════════════════════════════════╝",
-        "",
-        line,
-        sep,
-        f"{'Confirmed Smurf (both)':<28} {confirmed:>8}  {100*confirmed/total:>11.1f}%",
-        f"{'Flagged by LSTM only':<28} {lstm_only:>8}  {100*lstm_only/total:>11.1f}%",
-        f"{'Flagged by KMeans only':<28} {kmeans_only:>8}  {100*kmeans_only/total:>11.1f}%",
-        f"{'Honest (neither)':<28} {honest:>8}  {100*honest/total:>11.1f}%",
-        sep,
-        f"{'Total players':<28} {total:>8}",
-        "",
-        "  Confusion-Matrix View (LSTM rows × KMeans columns):",
-        "",
-    ]
+    # ── Merge everything onto kmeans base ─────────────────────────────────────
+    base = kmeans_df[["puuid", "kmeans_label"]].copy()
 
-    # 2×2 confusion matrix layout
-    cm_header = f"  {'':16}  {'KMeans: Smurf':>14}  {'KMeans: Honest':>15}"
-    cm_row1   = (f"  {'LSTM: Smurf':<16}  {confirmed:>14}  {lstm_only:>15}")
-    cm_row2   = (f"  {'LSTM: Honest':<16}  {kmeans_only:>14}  {honest:>15}")
-    summary_lines += [cm_header, "  " + sep, cm_row1, cm_row2, ""]
+    merged_raw  = base.merge(raw_player,  on="puuid", how="outer")
+    merged_cut  = base.merge(cut_player,  on="puuid", how="outer")
+    merged_pool = base.merge(pool_player, on="puuid", how="outer")
+    merged_ens  = base.merge(lstm_df[["puuid", "lstm_label"]], on="puuid", how="outer")
 
-    summary_text = "\n".join(summary_lines)
-    print(summary_text)
+    all_text  = print_confusion("raw_label",   "RAW Model vs KMeans",      merged_raw)
+    all_text += print_confusion("cut_label",   "CUT Model vs KMeans",      merged_cut)
+    all_text += print_confusion("pool_label",  "POOL Model vs KMeans",     merged_pool)
+    all_text += print_confusion("lstm_label",  "Ensemble vs KMeans",       merged_ens)
 
     # ── Save outputs ──────────────────────────────────────────────────────────
-    merged.to_csv("smurf_results_combined.csv", index=False)
+    merged_ens.to_csv("smurf_results_combined.csv", index=False)
     print("[Compare] Full merged results saved → smurf_results_combined.csv")
 
-    with open("smurf_comparison_summary.txt", "w") as fh:
-        fh.write(summary_text)
+    with open("smurf_comparison_summary.txt", "w", encoding="utf-8") as fh:
+        fh.write(all_text)
     print("[Compare] Summary saved → smurf_comparison_summary.txt")
 
-    return merged
+    return merged_ens
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -633,14 +801,17 @@ def compare_and_report(lstm_df, kmeans_df):
 # ═════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    # 1. Load shared data
+    # check to see if GPU is available
+    import tensorflow as tf
+    print(tf.config.list_physical_devices('GPU'))
+    print(tf.sysconfig.get_build_info())
+    print(tf.sysconfig.get_build_info()['is_cuda_build'])
+
+    # loads data
     x_data, y_data, puuids = load_data()
-
-    # 2. Run LSTM pipeline
-    lstm_results   = run_lstm_pipeline(x_data, y_data, puuids)
-
-    # 3. Run KMeans pipeline
+    # runs LSTM pipeline
+    lstm_results, lstm_games, lstm_thresholds = run_lstm_pipeline(x_data, y_data, puuids)
+    # runs KMeans pipeline
     kmeans_results = run_kmeans_pipeline(x_data, y_data, puuids)
-
-    # 4. Compare and report
-    final_df = compare_and_report(lstm_results, kmeans_results)
+    # compares LSTM and KMeans results and generates reports
+    final_df = compare_and_report(lstm_results, lstm_games, lstm_thresholds, kmeans_results)
