@@ -2,7 +2,7 @@ import json
 import numpy as np
 import os
 
-INPUT_FILE = "Full_Data.jsonl"
+INPUT_FILE = "Full_Data_combined.jsonl"
 OUTPUT_X = "X_data_no_padding.npy"
 OUTPUT_Y = "y_data_no_padding.npy"
 OUTPUT_PUUID = "puuid_data_no_padding.npy"
@@ -24,6 +24,7 @@ def process():
 
     print(f"Processing {INPUT_FILE}...")
 
+    # open the jsonl file and for each line, load the json and append the puuid, rank, and frames to the respective dfs
     with open(INPUT_FILE, "r") as f:
         for line in f:
             try:

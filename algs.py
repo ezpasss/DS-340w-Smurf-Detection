@@ -340,13 +340,6 @@ if __name__ == "__main__":
         X_val, X_test, y_val, y_test = train_test_split(
             X_temp, y_temp, test_size=1/3, random_state=42, stratify=y_temp)
 
-        mean = X_train.mean(axis=(0,1), keepdims=True)
-        std  = X_train.std(axis=(0,1), keepdims=True) + 1e-8
-
-        X_train = (X_train - mean) / std
-        X_val   = (X_val   - mean) / std
-        X_test  = (X_test  - mean) / std
-
         N, T, F = x_26.shape
         print(f"Shape after filtering for 25-minute sequences: N={N}, T={T}, F={F}")
 
@@ -408,13 +401,6 @@ if __name__ == "__main__":
 
         X_val, X_test, y_val, y_test = train_test_split(
             X_temp, y_temp, test_size=1/3, random_state=42, stratify=y_temp)
-
-        mean = X_train.mean(axis=(0,1), keepdims=True)
-        std  = X_train.std(axis=(0,1), keepdims=True) + 1e-8
-
-        X_train = (X_train - mean) / std
-        X_val   = (X_val   - mean) / std
-        X_test  = (X_test  - mean) / std
 
         N, T, F = x_data_pooled.shape
 

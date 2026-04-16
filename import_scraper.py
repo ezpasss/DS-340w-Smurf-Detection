@@ -6,7 +6,7 @@ import signal
 import sys
 from riotwatcher import LolWatcher, ApiError
 
-API_KEY = "RGAPI-e3702cca-c06a-4c29-a182-28cc30c6ffc0"  # <-- REPLACE with your Riot API key
+API_KEY = "RGAPI-48d6dd29-f8aa-4969-9fc6-ecaa0d99145d"  # <-- REPLACE with your Riot API key
 REGION_PLATFORM = "na1"
 REGION_ROUTING = "AMERICAS"
 OUTPUT_FILE = "Full_Data.jsonl"
@@ -23,6 +23,7 @@ watcher = LolWatcher(API_KEY)
 seen_player_matches = set()
 running = True
 
+# if ctrl+c is entered makes sure outputs are saved to json before closing. 
 def signal_handler(sig, frame):
     global running
     print("\n[!] Ctrl+C received. Finishing current item...")
@@ -30,6 +31,7 @@ def signal_handler(sig, frame):
 
 signal.signal(signal.SIGINT, signal_handler)
 
+# opens the json file and loads existing saved data
 if os.path.exists(OUTPUT_FILE):
     with open(OUTPUT_FILE, "r") as f:
         for line in f:
@@ -40,6 +42,7 @@ if os.path.exists(OUTPUT_FILE):
                 pass
     print(f"Loaded {len(seen_player_matches)} existing player-game records.")
 
+# api calling to get a summoners puuid from their summoner id. 
 def get_puuid_robust(summoner_id):
     try:
         summ = watcher.summoner.by_id(REGION_PLATFORM, summoner_id)
@@ -47,6 +50,7 @@ def get_puuid_robust(summoner_id):
     except ApiError:
         return None
 
+# collects a frame of time series data for a match
 def extract_frame_vector(p_data):
     """Extract all 47 features from a single participant frame."""
     cs = p_data.get("championStats", {})
@@ -103,6 +107,7 @@ def extract_frame_vector(p_data):
         p_data.get("xp", 0),
     ]
 
+# api call to get the timeline of a match and extract the 47 features for each frame for a given player
 def get_player_timeline(match_id, puuid):
     """
     Returns list of 47-feature vectors at natural game length — no padding.
@@ -139,12 +144,16 @@ def get_player_timeline(match_id, puuid):
 # --- MAIN LOOP ---
 print("--- STARTING HARVEST (Ctrl+C to stop) ---")
 
+# runs until ctrl+c
 while running:
+    # random select a tier and devision to scrape from. 
     tier = random.choice(TIERS)
     division = random.choice(DIVISIONS) if tier not in ["MASTER", "GRANDMASTER", "CHALLENGER"] else "I"
     print(f"\n>>> Scavenging {tier} {division}...")
 
     try:
+        # if player is in master, grandmaster, or challenger tiers their is no devision
+        # randomly slects a page of players to scrape
         if tier in ["MASTER", "GRANDMASTER", "CHALLENGER"]:
             func = {
                 "MASTER": watcher.league.masters_by_queue,
@@ -160,8 +169,10 @@ while running:
 
         if not entries:
             continue
-
+        
+        # randomly shuffle the players
         random.shuffle(entries)
+        # for the first 5 players in the list, get their puuid and then get a list of their most recent matches
         for entry in entries[:5]:
             if not running:
                 break
@@ -179,6 +190,7 @@ while running:
 
             print(f"  > Player {puuid[:12]}... ({len(match_ids)} matches)")
 
+            # for each match id get the timeline and extract the 47 features for each frame and save to jsonl file.
             for m_id in match_ids:
                 if not running:
                     break
@@ -203,6 +215,7 @@ while running:
                     seen_player_matches.add((puuid, m_id))
                     print(f"    + {puuid[:12]}... | {m_id} | {len(player_frames)} frames")
 
+                # added to prevent overcalling the api and getting rate limited.
                 time.sleep(1.2)
 
     except ApiError as e:
