@@ -9,7 +9,7 @@ This model is designed to detect player anomalies or smurfs in the game League o
 
 ## 📊 Data Access
 The required NumPy datasets are hosted on Google Drive due to their size.
-**[Link to Google Drive Data]** (Insert your link here)
+**[Link to Google Drive Data]** (https://drive.google.com/drive/folders/1yXTsrwngAfOqXuUUSIgt8nJ0jI_EjVg8?usp=sharing)
 
 ## 🚀 Getting Started
 
