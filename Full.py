@@ -25,6 +25,7 @@ Outputs:
 import numpy as np
 import pandas as pd
 from math import gcd
+import os
 
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
@@ -39,6 +40,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 from sklearn.metrics import roc_curve
+from sklearn.metrics import precision_recall_curve, fbeta_score
 
 import os
 os.environ["OMP_NUM_THREADS"] = "9"
@@ -51,7 +53,6 @@ Y_PATH     = "y_data_no_padding.npy"
 PUUID_PATH = "puuid_data_no_padding.npy"
 
 MIN_GAME_MINUTES = 15   # drop remakes (KMeans pipeline filter)
-IQR_C            = 1.5  # IQR multiplier for KMeans smurf flagging
 LSTM_THRESHOLD   = 0.5  # probability threshold for LSTM smurf verdict
 
 RANK_NAMES = {
@@ -286,13 +287,6 @@ def run_lstm_pipeline(x_data, y_data, puuids):
     X_padded = np.zeros((len(x_data), T, F), dtype=np.float32)
     for i, seq in enumerate(x_data):
         X_padded[i, :len(seq), :] = seq
-
-    # ── Train / test split (shared indices so puuids stay aligned) ───────────
-    idx_all = np.arange(len(x_data))
-    idx_tr, idx_tmp, y_tr, y_tmp = train_test_split(
-        idx_all, y_bin, test_size=0.3, random_state=42, stratify=y_bin)
-    idx_val, idx_test, y_val, y_test = train_test_split(
-        idx_tmp, y_tmp, test_size=1/3, random_state=42, stratify=y_tmp)
     
     # ─────────────────────────────────────────────────────────────────────────
     # FEATURE SCORING — run once on the full padded set before any model trains
@@ -300,6 +294,33 @@ def run_lstm_pipeline(x_data, y_data, puuids):
     print("\n[LSTM] Computing DTW feature scores (this may take a few minutes) ...")
     feat_scores = calculate_feature_score(X_padded, y_data, dtw)
     print_top_features(feat_scores, label="all models")
+
+    print("\n[LSTM] Computing DTW feature scores (this may take a few minutes) ...")
+    feat_scores = calculate_feature_score(X_padded[idx_tr], y_bin[idx_tr], dtw)
+    print_top_features(feat_scores, label="all models")
+
+    # ── Drop bottom 22 features ───────────────────────────────────────────────
+    feature_score   = feat_scores.mean(axis=1)
+    ranked          = np.argsort(feature_score)[::-1]
+    n_drop          = 22
+    n_keep          = F - n_drop
+    top_feature_idx = np.sort(ranked[:n_keep])
+    dropped_names   = [FEATURE_LIST[i] for i in ranked[n_keep:]]
+    F               = n_keep
+
+    print(f"\n[LSTM] Keeping {n_keep}/{F + n_drop} features, dropping bottom {n_drop}:")
+    for rank_pos, name in enumerate(dropped_names, 1):
+        print(f"  {rank_pos:>2}. {name}")
+
+    # Apply to all data arrays before any model sees the data
+    X_padded = X_padded[:, :, top_feature_idx]
+
+    # ── Train / test split (shared indices so puuids stay aligned) ───────────
+    idx_all = np.arange(len(x_data))
+    idx_tr, idx_tmp, y_tr, y_tmp = train_test_split(
+        idx_all, y_bin, test_size=0.3, random_state=42, stratify=y_bin)
+    idx_val, idx_test, y_val, y_test = train_test_split(
+        idx_tmp, y_tmp, test_size=1/3, random_state=42, stratify=y_tmp)
 
     # ── RAW MODEL ─────────────────────────────────────────────────────────────
     print("\n[LSTM] Training RAW model ...")
@@ -309,15 +330,26 @@ def run_lstm_pipeline(x_data, y_data, puuids):
     X_val_raw = X_padded[idx_val]
     X_te_raw  = X_padded[idx_test]
 
+    os.makedirs("models", exist_ok=True)
+
     raw_model = build_play_pattern_model(F, kernel_size=3, pool_size=2)
-    raw_model.summary()
-    raw_model.fit(
-        X_tr_raw, make_timestep_labels(y_tr, T_out_raw),
-        validation_data=(X_val_raw, make_timestep_labels(y_val, T_out_raw)),
-        epochs=100, batch_size=32,
-        callbacks=[EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)],
-        verbose=1
-    )
+
+    if os.path.exists("models/raw_model.keras"):
+        print("[LSTM] Loading saved RAW model from models/raw_model.keras ...")
+        raw_model.load_weights("models/raw_model.keras")
+    else:
+        print("[LSTM] No saved RAW model found — training from scratch ...")
+        raw_model.summary()
+        raw_model.fit(
+            X_tr_raw, make_timestep_labels(y_tr, T_out_raw),
+            validation_data=(X_val_raw, make_timestep_labels(y_val, T_out_raw)),
+            epochs=100, batch_size=32,
+            callbacks=[EarlyStopping(monitor="val_loss", patience=5,
+                                     restore_best_weights=True)],
+            verbose=1
+        )
+        raw_model.save("models/raw_model.keras")
+        print("[LSTM] RAW model saved → models/raw_model.keras")
 
     raw_pred_test  = raw_model.predict(X_te_raw, verbose=0)           # (N_test, T_out, 1)
     y_test_seq_raw = make_timestep_labels(y_test, T_out_raw)
@@ -355,14 +387,24 @@ def run_lstm_pipeline(x_data, y_data, puuids):
 
     T_out_cut = output_timesteps(T_cut, kernel_size=3, pool_size=2)
     cut_model = build_play_pattern_model(F, kernel_size=3, pool_size=2)
-    cut_model.summary()
-    cut_model.fit(
-        X_ctr, make_timestep_labels(y_ctr, T_out_cut),
-        validation_data=(X_cval, make_timestep_labels(y_cval, T_out_cut)),
-        epochs=100, batch_size=32,
-        callbacks=[EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)],
-        verbose=1
-    )
+    if os.path.exists("models/cut_model.keras"):
+        print("[LSTM] Loading saved CUT model from models/cut_model.keras ...")
+        cut_model.load_weights("models/cut_model.keras")
+    else:
+        print("[LSTM] No saved CUT model found — training from scratch ...")
+        if os.path.exists("models/raw_model.keras"):
+            print("[LSTM] Loading saved RAW model from models/raw_model.keras ...")
+            raw_model.load_weights("models/raw_model.keras")
+        cut_model.summary()
+        cut_model.fit(
+            X_ctr, make_timestep_labels(y_ctr, T_out_cut),
+            validation_data=(X_cval, make_timestep_labels(y_cval, T_out_cut)),
+            epochs=100, batch_size=32,
+            callbacks=[EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)],
+            verbose=1
+        )
+        cut_model.save("models/cut_model.keras")
+        print("[LSTM] CUT model saved → models/cut_model.keras")
 
     cut_pred_test  = cut_model.predict(X_cte, verbose=0)
     y_test_seq_cut = make_timestep_labels(y_ctest, T_out_cut)
@@ -379,12 +421,19 @@ def run_lstm_pipeline(x_data, y_data, puuids):
     X_pte  = X_pooled[idx_test]
 
     pool_model = build_play_pattern_model(F, kernel_size=3, pool_size=2)
-    pool_model.summary()
-    pool_model.fit(
-        X_ptr,  make_timestep_labels(y_tr,   T_out_pool),
-        validation_data=(X_pval, make_timestep_labels(y_val, T_out_pool)),
-        epochs=100, batch_size=32, callbacks=[EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)], verbose=1
-    )
+    if os.path.exists("models/pool_model.keras"):
+        print("[LSTM] Loading saved POOL model from models/pool_model.keras ...")
+        pool_model.load_weights("models/pool_model.keras")
+    else:
+        print("[LSTM] No saved POOL model found — training from scratch ...")
+        pool_model.summary()
+        pool_model.fit(
+            X_ptr,  make_timestep_labels(y_tr,   T_out_pool),
+            validation_data=(X_pval, make_timestep_labels(y_val, T_out_pool)),
+            epochs=100, batch_size=32, callbacks=[EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)], verbose=1
+        )
+        pool_model.save("models/pool_model.keras")
+        print("[LSTM] POOL model saved → models/pool_model.keras")
 
     pool_pred_test  = pool_model.predict(X_pte, verbose=0)
     y_test_seq_pool = make_timestep_labels(y_test, T_out_pool)
@@ -450,6 +499,84 @@ def run_lstm_pipeline(x_data, y_data, puuids):
     plt.close()
     print("[LSTM] AUC chart saved -> auc_over_time.png")
 
+    # ── AUC OVER TIME — EXTREME TIERS ONLY (drop ranks 4, 5, 6) ─────────────
+    print("\n[LSTM] Generating extreme-tiers AUC chart (dropping ranks 4/5/6) ...")
+
+    # Build mask for games that are NOT rank 4, 5, or 6
+    extreme_mask = ~np.isin(y_data, [4, 5, 6])
+
+    # Remap to binary: 0-3 = low, 7-9 = high
+    y_extreme     = (y_data[extreme_mask] > 4).astype(int)
+    idx_extreme   = np.where(extreme_mask)[0]
+
+    print(f"[LSTM] Extreme tier games: {extreme_mask.sum()} / {len(y_data)} "
+          f"({extreme_mask.mean()*100:.1f}%)  "
+          f"high-tier rate: {y_extreme.mean()*100:.1f}%")
+
+    # Get predictions for extreme-tier games from each model
+    # Raw — use X_padded directly indexed by extreme mask
+    raw_preds_ext  = raw_model.predict(
+        X_padded[extreme_mask], verbose=0)[:, :, 0]
+
+    # Pool — repool just the extreme subset
+    pool_preds_ext = pool_model.predict(
+        pool_method(X_padded[extreme_mask], target_size=26), verbose=0)[:, :, 0]
+
+    # Cut — only extreme games that also pass cut_mask
+    extreme_and_cut = extreme_mask & cut_mask
+    cut_preds_ext   = cut_model.predict(
+        X_padded[extreme_and_cut, :26, :], verbose=0)[:, :, 0]
+    y_extreme_cut   = (y_data[extreme_and_cut] > 4).astype(int)
+
+    def auc_curve_extreme(preds, y_labels, T_out):
+        y_true = make_timestep_labels(y_labels, T_out)[:, :, 0]
+        # pad or trim preds to T_out timesteps
+        preds_trimmed = preds[:, :T_out]
+        return np.array([
+            roc_auc_score(
+                y_true[:, :m].reshape(-1),
+                preds_trimmed[:, :m].reshape(-1)
+            )
+            for m in range(1, T_out + 1)
+        ])
+
+    raw_auc_ext  = auc_curve_extreme(raw_preds_ext,  y_extreme,     T_out_raw)
+    pool_auc_ext = auc_curve_extreme(pool_preds_ext, y_extreme,     T_out_pool)
+    cut_auc_ext  = auc_curve_extreme(cut_preds_ext,  y_extreme_cut, T_out_cut)
+
+    raw_min_ext  = to_minutes(raw_auc_ext,  T)
+    cut_min_ext  = to_minutes(cut_auc_ext,  T_cut)
+    pool_min_ext = to_minutes(pool_auc_ext, 26)
+
+    plt.figure(figsize=(7, 5))
+    for auc_curve, minutes, label, color in [
+        (raw_auc_ext,  raw_min_ext,  "raw",  "tab:blue"),
+        (cut_auc_ext,  cut_min_ext,  "cut",  "tab:orange"),
+        (pool_auc_ext, pool_min_ext, "pool", "tab:green"),
+    ]:
+        mask        = minutes <= MAX_MIN
+        mins_masked = minutes[mask]
+        auc_masked  = auc_curve[mask]
+        plt.plot(mins_masked, auc_masked, label=label, color=color)
+        plt.scatter(mins_masked[-1], auc_masked[-1], s=35, color=color, zorder=5)
+        plt.axhline(auc_masked[-1], linestyle="--", linewidth=1,
+                    color=color, alpha=0.75)
+        plt.text(mins_masked[0], auc_masked[-1], f"{auc_masked[-1]:.4f}",
+                 ha="left", va="bottom", color=color, fontsize=9)
+
+    plt.axvline(MAX_MIN, linestyle="--", linewidth=1, color="k", alpha=0.75)
+    plt.title("AUC — Extreme Tiers Only (Iron–Gold vs Master–Challenger)")
+    plt.xlabel("Elapsed Time (minute)")
+    plt.ylabel("Probability")
+    plt.ylim(0.5, 1.0)
+    plt.xlim(0, MAX_MIN)
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig("auc_over_time_extreme.png", dpi=300, bbox_inches="tight")
+    plt.close()
+    print("[LSTM] Extreme-tiers AUC chart saved -> auc_over_time_extreme.png")
+
     # ── INFERENCE — full dataset for smurf scoring ────────────────────────────
     print("\n[LSTM] Running inference on full dataset ...")
 
@@ -468,12 +595,16 @@ def run_lstm_pipeline(x_data, y_data, puuids):
     # ─────────────────────────────────────────────────────────────────────────
     # SMURF DETECTION — optimal ROC thresholds (from algs.py smurf_detection)
     # ─────────────────────────────────────────────────────────────────────────
-    print("\n[LSTM] Detecting smurfs via optimal ROC thresholds ...")
+    print("\n[LSTM] Detecting smurfs via optimal thresholds ...")
 
-    # calculates the optimal roc threshold
-    def get_threshold(labels, probs):
-        fpr, tpr, thresholds = roc_curve(labels, probs)
-        return thresholds[np.argmax(tpr - fpr)]
+    # calculates the optimal threshold
+    # ── Threshold helper — precision-weighted F-beta (beta=0.5) ──────────────
+    # Weights precision 4x more than recall: false accusations worse than misses
+    def get_threshold(labels, probs, beta=0.5):
+        precision, recall, thresholds = precision_recall_curve(labels, probs)
+        # beta < 1 weights precision more than recall
+        f_scores = (1 + beta**2) * (precision * recall) / (beta**2 * precision + recall + 1e-8)
+        return thresholds[np.argmax(f_scores[:-1])]
 
     # Work on test-set game rows so thresholds are found on held-out data
     df_test_raw  = pd.DataFrame({"prob": raw_probs_all[idx_test],  "label": y_test})
@@ -557,7 +688,13 @@ def run_lstm_pipeline(x_data, y_data, puuids):
 #  METHOD 2 — KMEANS + PCA PIPELINE
 # ═════════════════════════════════════════════════════════════════════════════
 
-KMEANS_FEATURE_NAMES = ['GPM', 'XPM', 'LHPM', 'HDPM', 'CCPM', 'DTPM']
+KMEANS_FEATURE_NAMES = [
+    'GPM', 'XPM', 'LHPM', 'HDPM', 'CCPM', 'DTPM',
+    'GoldAccel', 'ChampRatio'
+]
+
+IQR_C = 0.75  # tighter than default 1.5 to catch more outliers
+
 
 def gap_statistics(X, k_max=10, n_refs=10, random_state=42):
     rng  = np.random.default_rng(random_state)
@@ -687,7 +824,6 @@ def run_kmeans_pipeline(x_data, y_data, puuids):
     print("[KMeans] Results saved → smurf_results_kmeans.csv")
     return result
 
-
 # ═════════════════════════════════════════════════════════════════════════════
 #  COMPARISON & REPORTING
 # ═════════════════════════════════════════════════════════════════════════════
@@ -786,12 +922,12 @@ def compare_and_report(lstm_df, lstm_games_df, lstm_thresholds, kmeans_df):
     all_text += print_confusion("lstm_label",  "Ensemble vs KMeans",       merged_ens)
 
     # ── Save outputs ──────────────────────────────────────────────────────────
-    merged_ens.to_csv("smurf_results_combined.csv", index=False)
-    print("[Compare] Full merged results saved → smurf_results_combined.csv")
+    merged_ens.to_csv("smurf_results_combined1.csv", index=False)
+    print("[Compare] Full merged results saved → smurf_results_combined1.csv")
 
-    with open("smurf_comparison_summary.txt", "w", encoding="utf-8") as fh:
+    with open("smurf_comparison_summary1.txt", "w", encoding="utf-8") as fh:
         fh.write(all_text)
-    print("[Compare] Summary saved → smurf_comparison_summary.txt")
+    print("[Compare] Summary saved → smurf_comparison_summary1.txt")
 
     return merged_ens
 
