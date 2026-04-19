@@ -6,7 +6,7 @@ import signal
 import sys
 from riotwatcher import LolWatcher, ApiError
 
-API_KEY = "RGAPI-48d6dd29-f8aa-4969-9fc6-ecaa0d99145d"  # <-- REPLACE with your Riot API key
+API_KEY = "RGAPI-da2073f2-56af-40fe-921e-6970dc19a532"  # <-- REPLACE with your Riot API key
 REGION_PLATFORM = "na1"
 REGION_ROUTING = "AMERICAS"
 OUTPUT_FILE = "Full_Data.jsonl"
