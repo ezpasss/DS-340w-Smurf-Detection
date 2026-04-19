@@ -1,0 +1,28 @@
+# ─── Data files ───────────────────────────────────────────────────────────────
+Full_Data.jsonl
+Full_Data1.jsonl
+Full_Data_an.jsonl
+Full_Data_combined.jsonl
+
+# ─── Numpy arrays ─────────────────────────────────────────────────────────────
+X_47_t30.npy
+X_47_t60.npy
+X_data_no_padding.npy
+puuid_data_no_padding.npy
+y_47_t30.npy
+y_47_t60.npy
+y_data_no_padding.npy
+
+# ─── Output plots ─────────────────────────────────────────────────────────────
+alg30_combined_auc_plot.png
+alg30_cut_auc_plot.png
+alg30_pool_auc_plot.png
+alg30_raw_auc_plot.png
+
+# ─── Results ──────────────────────────────────────────────────────────────────
+smurf_comparison_summary.txt
+smurf_comparison_summary1.txt
+smurf_results_combined.csv
+smurf_results_combined1.csv
+smurf_results_kmeans.csv
+smurf_results_lstm.csv
