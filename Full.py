@@ -296,6 +296,13 @@ def run_lstm_pipeline(x_data, y_data, puuids):
     X_padded = np.zeros((len(x_data), T, F), dtype=np.float32)
     for i, seq in enumerate(x_data):
         X_padded[i, :len(seq), :] = seq
+
+    # ── Train / test split (shared indices so puuids stay aligned) ───────────
+    idx_all = np.arange(len(x_data))
+    idx_tr, idx_tmp, y_tr, y_tmp = train_test_split(
+        idx_all, y_bin, test_size=0.3, random_state=42, stratify=y_bin)
+    idx_val, idx_test, y_val, y_test = train_test_split(
+        idx_tmp, y_tmp, test_size=1/3, random_state=42, stratify=y_tmp)
     
     # ─────────────────────────────────────────────────────────────────────────
     # FEATURE SCORING — run once on the full padded set before any model trains
@@ -304,32 +311,32 @@ def run_lstm_pipeline(x_data, y_data, puuids):
     feat_scores = calculate_feature_score(X_padded, y_data, dtw)
     print_top_features(feat_scores, label="all models")
 
-    print("\n[LSTM] Computing DTW feature scores (this may take a few minutes) ...")
-    feat_scores = calculate_feature_score(X_padded[idx_tr], y_bin[idx_tr], dtw)
-    print_top_features(feat_scores, label="all models")
+    # ── Drop bottom 22 features (protected features are never removed) ────────
+    PROTECTED_FEATURES = ['totalGold']
+    protected_idx      = [FEATURE_LIST.index(f) for f in PROTECTED_FEATURES]
 
-    # ── Drop bottom 22 features ───────────────────────────────────────────────
-    feature_score   = feat_scores.mean(axis=1)
-    ranked          = np.argsort(feature_score)[::-1]
-    n_drop          = 22
-    n_keep          = F - n_drop
-    top_feature_idx = np.sort(ranked[:n_keep])
-    dropped_names   = [FEATURE_LIST[i] for i in ranked[n_keep:]]
-    F               = n_keep
+    feature_score = feat_scores.mean(axis=1)
+    ranked        = np.argsort(feature_score)[::-1]  # best to worst
 
-    print(f"\n[LSTM] Keeping {n_keep}/{F + n_drop} features, dropping bottom {n_drop}:")
-    for rank_pos, name in enumerate(dropped_names, 1):
-        print(f"  {rank_pos:>2}. {name}")
+    # Build drop list — skip any protected features
+    n_drop       = 22
+    dropped_idx  = []
+    for idx in reversed(ranked):  # worst first
+        if len(dropped_idx) >= n_drop:
+            break
+        if idx not in protected_idx:
+            dropped_idx.append(idx)
 
-    # Apply to all data arrays before any model sees the data
+    dropped_idx     = set(dropped_idx)
+    top_feature_idx = np.sort([i for i in range(F) if i not in dropped_idx])
+    dropped_names   = [FEATURE_LIST[i] for i in dropped_idx]
+    F               = len(top_feature_idx)
     X_padded = X_padded[:, :, top_feature_idx]
 
-    # ── Train / test split (shared indices so puuids stay aligned) ───────────
-    idx_all = np.arange(len(x_data))
-    idx_tr, idx_tmp, y_tr, y_tmp = train_test_split(
-        idx_all, y_bin, test_size=0.3, random_state=42, stratify=y_bin)
-    idx_val, idx_test, y_val, y_test = train_test_split(
-        idx_tmp, y_tmp, test_size=1/3, random_state=42, stratify=y_tmp)
+    print(f"\n[LSTM] Keeping {F}/{F + len(dropped_idx)} features, "
+          f"dropping bottom {n_drop} (protected: {PROTECTED_FEATURES}):")
+    for name in dropped_names:
+        print(f"  - {name}")
 
     # ── RAW MODEL ─────────────────────────────────────────────────────────────
     print("\n[LSTM] Training RAW model ...")
@@ -367,7 +374,7 @@ def run_lstm_pipeline(x_data, y_data, puuids):
 
     # ── CUT MODEL (only games with full 25-min data) ──────────────────────────
     print("\n[LSTM] Training CUT model ...")
-    gold_idx = FEATURE_LIST.index('totalGold')
+    gold_idx = list(top_feature_idx).index(FEATURE_LIST.index('totalGold'))
     
     x_26 = X_padded[:, :26, :]
 
@@ -546,8 +553,7 @@ def run_lstm_pipeline(x_data, y_data, puuids):
                 y_true[:, :m].reshape(-1),
                 preds_trimmed[:, :m].reshape(-1)
             )
-            for m in range(1, T_out + 1)
-        ])
+            for m in range(1, T_out + 1)])
 
     raw_auc_ext  = auc_curve_extreme(raw_preds_ext,  y_extreme,     T_out_raw)
     pool_auc_ext = auc_curve_extreme(pool_preds_ext, y_extreme,     T_out_pool)
@@ -672,20 +678,23 @@ def run_lstm_pipeline(x_data, y_data, puuids):
         rank_id   =("rank_id",   "median"),
     ).reset_index()
 
-    # Ensemble probability: mean of available model probs per player
-    df_player["lstm_prob"] = df_player[["raw_prob", "cut_prob", "pool_prob"]].mean(axis=1)
+    # Primary score: pool, fall back to cut if pool is unavailable
+    df_player["lstm_prob"] = np.where(
+        df_player["pool_prob"].notna(),
+        df_player["pool_prob"],
+        df_player["cut_prob"]
+    )
 
-    # Player-level smurf flag: ensemble prob >= mean of the three thresholds, actually low-tier
-    ensemble_thresh = np.mean([raw_thresh, cut_thresh, pool_thresh])
+    # Smurf = mean probability exceeds threshold AND scraped from low-tier lobby
     df_player["lstm_label"] = np.where(
-        (df_player["lstm_prob"] >= ensemble_thresh) & (df_player["rank_id"] <= 4),
+        (df_player["lstm_prob"] >= pool_thresh) & (df_player["rank_id"] <= 4),
         "Smurf", "Honest"
     )
 
     n_smurfs = (df_player["lstm_label"] == "Smurf").sum()
     print(f"[LSTM] {n_smurfs} smurfs detected out of {len(df_player)} players "
           f"({100 * n_smurfs / len(df_player):.1f}%)  "
-          f"[ensemble threshold: {ensemble_thresh:.4f}]")
+          f"[threshold: {pool_thresh:.4f}]")
 
     result = df_player[["puuid", "lstm_prob", "lstm_label"]].copy()
     result.to_csv("smurf_results_lstm.csv", index=False)
@@ -756,8 +765,24 @@ def run_kmeans_pipeline(x_data, y_data, puuids):
         hdpm  = final[COL['damageStats_totalDamageDoneToChampions']] / T
         ccpm  = final[COL['timeEnemySpentControlled']] / T
         dtpm  = final[COL['damageStats_totalDamageTaken']] / T
-        records.append([gpm, xpm, lhpm, hdpm, ccpm, dtpm])
 
+        # Early game gold acceleration vs late game
+        if T >= 5:
+            early           = seq[4]  # minute 5 snapshot
+            early_gold_rate = early[COL['totalGold']] / 5.0
+            late_gold_rate  = final[COL['totalGold']] / T
+            gold_accel      = early_gold_rate / (late_gold_rate + 1e-8)
+        else:
+            gold_accel = 1.0
+
+        # Champion-focused damage ratio
+        total_dmg   = final[COL['damageStats_totalDamageDone']] + 1e-8
+        champ_dmg   = final[COL['damageStats_totalDamageDoneToChampions']]
+        champ_ratio = champ_dmg / total_dmg
+
+        records.append([gpm, xpm, lhpm, hdpm, ccpm, dtpm, gold_accel, champ_ratio])
+
+    # ── Convert to numpy array ────────────────────────────────────────────────
     X_feat = np.nan_to_num(np.array(records, dtype=np.float32),
                            nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -789,8 +814,6 @@ def run_kmeans_pipeline(x_data, y_data, puuids):
     player_profiles['cluster'] = cluster_labels
 
     # ── Label clusters (low / avg / high) ─────────────────────────────────────
-    # Use mean of the standardised feature values so non-feature columns
-    # (puuid, rank_id, cluster) don't corrupt the rank.
     cluster_means   = {c: X_scaled[cluster_labels == c].mean()
                        for c in range(optimal_k)}
     sorted_clusters = sorted(cluster_means, key=cluster_means.get)
@@ -813,21 +836,15 @@ def run_kmeans_pipeline(x_data, y_data, puuids):
     print(f"[KMeans] high-performing = cluster {high_cluster}")
 
     # ── IQR smurf detection within high-performing cluster ────────────────────
-    # Paper method (Algorithm 3 + Section IV-B):
-    #   Apply IQR_WH — IQR on the WHOLE high-performing cluster using the
-    #   original (pre-PCA, pre-scale) feature values.  A player is a smurf/
-    #   booster if they exceed  Q3 + c*IQR  on ANY of the performance features.
-    #   This matches the paper's Table VI (high values in ALL features for the
-    #   smurf profile) and recovers ~1.6% smurf rate rather than near-zero.
-    high_mask        = cluster_labels == high_cluster
-    high_feat_vals   = X_player[high_mask]          # shape (n_high, n_features)
+    high_mask      = cluster_labels == high_cluster
+    high_feat_vals = X_player[high_mask]
 
-    smurf_in_high    = np.zeros(high_mask.sum(), dtype=bool)
+    smurf_in_high = np.zeros(high_mask.sum(), dtype=bool)
     for fi in range(high_feat_vals.shape[1]):
-        col_vals  = high_feat_vals[:, fi]
-        Q1        = np.percentile(col_vals, 25)
-        Q3        = np.percentile(col_vals, 75)
-        upper     = Q3 + IQR_C * (Q3 - Q1)
+        col_vals = high_feat_vals[:, fi]
+        Q1       = np.percentile(col_vals, 25)
+        Q3       = np.percentile(col_vals, 75)
+        upper    = Q3 + IQR_C * (Q3 - Q1)
         smurf_in_high |= (col_vals > upper)
 
     high_indices               = np.where(high_mask)[0]
@@ -836,7 +853,7 @@ def run_kmeans_pipeline(x_data, y_data, puuids):
 
     player_profiles['kmeans_label'] = np.where(smurf_mask, 'Smurf', 'Honest')
 
-    # Also store centroid distance for diagnostics (optional, not used for detection)
+    # Store centroid distance for diagnostics
     centroid     = km.cluster_centers_[high_cluster]
     high_pca_pts = X_pca[high_mask]
     distances    = np.linalg.norm(high_pca_pts - centroid, axis=1)
@@ -863,10 +880,8 @@ def compare_and_report(lstm_df, lstm_games_df, lstm_thresholds, kmeans_df):
       - RAW model vs KMeans
       - CUT model vs KMeans
       - POOL model vs KMeans
-      - LSTM Ensemble vs KMeans
+      - Final Model (Pool) vs KMeans
     """
-    from sklearn.metrics import roc_curve
-
     print("\n" + "=" * 70)
     print("  CROSS-MODEL COMPARISON")
     print("=" * 70)
@@ -892,7 +907,7 @@ def compare_and_report(lstm_df, lstm_games_df, lstm_thresholds, kmeans_df):
     pool_player = player_label_from_prob(lstm_games_df, "pool_prob", lstm_thresholds["pool"], "pool")
 
     # Cut: only players who have at least one cut-eligible game get a cut score
-    cut_games   = lstm_games_df[lstm_games_df["cut_prob"].notna()]
+    cut_games = lstm_games_df[lstm_games_df["cut_prob"].notna()]
     if len(cut_games) > 0:
         cut_player = player_label_from_prob(cut_games, "cut_prob", lstm_thresholds["cut"], "cut")
     else:
@@ -943,22 +958,22 @@ def compare_and_report(lstm_df, lstm_games_df, lstm_thresholds, kmeans_df):
     merged_raw  = base.merge(raw_player,  on="puuid", how="outer")
     merged_cut  = base.merge(cut_player,  on="puuid", how="outer")
     merged_pool = base.merge(pool_player, on="puuid", how="outer")
-    merged_ens  = base.merge(lstm_df[["puuid", "lstm_label"]], on="puuid", how="outer")
+    merged_final = base.merge(lstm_df[["puuid", "lstm_label"]], on="puuid", how="outer")
 
-    all_text  = print_confusion("raw_label",   "RAW Model vs KMeans",      merged_raw)
-    all_text += print_confusion("cut_label",   "CUT Model vs KMeans",      merged_cut)
-    all_text += print_confusion("pool_label",  "POOL Model vs KMeans",     merged_pool)
-    all_text += print_confusion("lstm_label",  "Ensemble vs KMeans",       merged_ens)
+    all_text  = print_confusion("raw_label",  "RAW Model vs KMeans",           merged_raw)
+    all_text += print_confusion("cut_label",  "CUT Model vs KMeans",           merged_cut)
+    all_text += print_confusion("pool_label", "POOL Model vs KMeans",          merged_pool)
+    all_text += print_confusion("lstm_label", "Final Model (Pool) vs KMeans",  merged_final)
 
     # ── Save outputs ──────────────────────────────────────────────────────────
-    merged_ens.to_csv("smurf_results_combined1.csv", index=False)
-    print("[Compare] Full merged results saved → smurf_results_combined1.csv")
+    merged_final.to_csv("smurf_results_combined.csv", index=False)
+    print("[Compare] Full merged results saved → smurf_results_combined.csv")
 
-    with open("smurf_comparison_summary1.txt", "w", encoding="utf-8") as fh:
+    with open("smurf_comparison_summary.txt", "w", encoding="utf-8") as fh:
         fh.write(all_text)
-    print("[Compare] Summary saved → smurf_comparison_summary1.txt")
+    print("[Compare] Summary saved → smurf_comparison_summary.txt")
 
-    return merged_ens
+    return merged_final
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -970,7 +985,7 @@ if __name__ == "__main__":
     import tensorflow as tf
     print(tf.config.list_physical_devices('GPU'))
     print(tf.sysconfig.get_build_info())
-    print(tf.sysconfig.get_build_info()['is_cuda_build'])
+    # print(tf.sysconfig.get_build_info()['is_cuda_build'])
 
     print(f"\n{'='*70}")
     print(f"  RUN MODE: {RUN_MODE}")
