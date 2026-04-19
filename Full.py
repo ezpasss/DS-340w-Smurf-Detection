@@ -46,6 +46,15 @@ import os
 os.environ["OMP_NUM_THREADS"] = "9"
 
 # ─────────────────────────────────────────────────────────────────────────────
+# RUN MODE — change this single variable to control what gets executed
+# ─────────────────────────────────────────────────────────────────────────────
+#   "BOTH"   — run LSTM + KMeans fresh, then compare
+#   "LSTM"   — run LSTM only (saves smurf_results_lstm.csv)
+#   "KMEANS" — run KMeans only (saves smurf_results_kmeans.csv)
+#   "COMPARE"— skip all training; load existing CSV results and compare
+RUN_MODE = "BOTH"
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SHARED CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 X_PATH     = "X_data_no_padding.npy"
@@ -780,7 +789,9 @@ def run_kmeans_pipeline(x_data, y_data, puuids):
     player_profiles['cluster'] = cluster_labels
 
     # ── Label clusters (low / avg / high) ─────────────────────────────────────
-    cluster_means   = {c: X_player[cluster_labels == c].mean()
+    # Use mean of the standardised feature values so non-feature columns
+    # (puuid, rank_id, cluster) don't corrupt the rank.
+    cluster_means   = {c: X_scaled[cluster_labels == c].mean()
                        for c in range(optimal_k)}
     sorted_clusters = sorted(cluster_means, key=cluster_means.get)
     high_cluster    = sorted_clusters[-1]
@@ -791,26 +802,44 @@ def run_kmeans_pipeline(x_data, y_data, puuids):
         if c not in label_map:
             label_map[c] = 'average-performing'
     player_profiles['profile'] = player_profiles['cluster'].map(label_map)
+
+    # Print per-cluster stats so you can sanity-check the labelling
+    for c in sorted_clusters:
+        mask_c = cluster_labels == c
+        lbl    = label_map[c]
+        means  = X_player[mask_c].mean(axis=0)
+        stats  = "  ".join(f"{n}={v:.2f}" for n, v in zip(KMEANS_FEATURE_NAMES, means))
+        print(f"[KMeans] cluster {c} → {lbl:20s}  n={mask_c.sum():5d}  {stats}")
     print(f"[KMeans] high-performing = cluster {high_cluster}")
 
     # ── IQR smurf detection within high-performing cluster ────────────────────
-    high_mask       = cluster_labels == high_cluster
-    high_pca_pts    = X_pca[high_mask]
-    centroid        = km.cluster_centers_[high_cluster]
-    distances       = np.linalg.norm(high_pca_pts - centroid, axis=1)
+    # Paper method (Algorithm 3 + Section IV-B):
+    #   Apply IQR_WH — IQR on the WHOLE high-performing cluster using the
+    #   original (pre-PCA, pre-scale) feature values.  A player is a smurf/
+    #   booster if they exceed  Q3 + c*IQR  on ANY of the performance features.
+    #   This matches the paper's Table VI (high values in ALL features for the
+    #   smurf profile) and recovers ~1.6% smurf rate rather than near-zero.
+    high_mask        = cluster_labels == high_cluster
+    high_feat_vals   = X_player[high_mask]          # shape (n_high, n_features)
 
-    Q1 = np.percentile(distances, 25)
-    Q3 = np.percentile(distances, 75)
-    upper_bound     = Q3 + IQR_C * (Q3 - Q1)
+    smurf_in_high    = np.zeros(high_mask.sum(), dtype=bool)
+    for fi in range(high_feat_vals.shape[1]):
+        col_vals  = high_feat_vals[:, fi]
+        Q1        = np.percentile(col_vals, 25)
+        Q3        = np.percentile(col_vals, 75)
+        upper     = Q3 + IQR_C * (Q3 - Q1)
+        smurf_in_high |= (col_vals > upper)
 
-    is_smurf_in_high           = distances > upper_bound
     high_indices               = np.where(high_mask)[0]
     smurf_mask                 = np.zeros(len(player_profiles), dtype=bool)
-    smurf_mask[high_indices[is_smurf_in_high]] = True
+    smurf_mask[high_indices[smurf_in_high]] = True
 
     player_profiles['kmeans_label'] = np.where(smurf_mask, 'Smurf', 'Honest')
 
-    # Store centroid distance for all players (NaN for non-high clusters)
+    # Also store centroid distance for diagnostics (optional, not used for detection)
+    centroid     = km.cluster_centers_[high_cluster]
+    high_pca_pts = X_pca[high_mask]
+    distances    = np.linalg.norm(high_pca_pts - centroid, axis=1)
     all_distances            = np.full(len(player_profiles), np.nan)
     all_distances[high_mask] = distances
     player_profiles['kmeans_dist'] = all_distances
@@ -937,17 +966,51 @@ def compare_and_report(lstm_df, lstm_games_df, lstm_thresholds, kmeans_df):
 # ═════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    # check to see if GPU is available
+    # ── GPU check ────────────────────────────────────────────────────────────
     import tensorflow as tf
     print(tf.config.list_physical_devices('GPU'))
     print(tf.sysconfig.get_build_info())
     print(tf.sysconfig.get_build_info()['is_cuda_build'])
 
-    # loads data
-    x_data, y_data, puuids = load_data()
-    # runs LSTM pipeline
-    lstm_results, lstm_games, lstm_thresholds = run_lstm_pipeline(x_data, y_data, puuids)
-    # runs KMeans pipeline
-    kmeans_results = run_kmeans_pipeline(x_data, y_data, puuids)
-    # compares LSTM and KMeans results and generates reports
-    final_df = compare_and_report(lstm_results, lstm_games, lstm_thresholds, kmeans_results)
+    print(f"\n{'='*70}")
+    print(f"  RUN MODE: {RUN_MODE}")
+    print(f"{'='*70}\n")
+
+    # ── COMPARE mode — load saved CSVs, skip all training ────────────────────
+    if RUN_MODE == "COMPARE":
+        print("[Mode] Loading existing results from CSV files ...")
+        lstm_results   = pd.read_csv("smurf_results_lstm.csv")
+        kmeans_results = pd.read_csv("smurf_results_kmeans.csv")
+
+        # Reconstruct a minimal lstm_games_df and thresholds so compare_and_report
+        # can still run.  Since we have no raw game-level data here, we build a
+        # stub that maps every player to their saved ensemble label/prob.
+        lstm_games = lstm_results.rename(columns={"lstm_prob": "raw_prob"})
+        lstm_games["cut_prob"]  = lstm_games["raw_prob"]
+        lstm_games["pool_prob"] = lstm_games["raw_prob"]
+        lstm_games["rank_id"]   = 0   # unknown without re-loading — only affects confusion counts
+        lstm_thresholds         = {"raw": 0.5, "cut": 0.5, "pool": 0.5}
+        compare_and_report(lstm_results, lstm_games, lstm_thresholds, kmeans_results)
+
+    # ── KMEANS only ───────────────────────────────────────────────────────────
+    elif RUN_MODE == "KMEANS":
+        x_data, y_data, puuids = load_data()
+        kmeans_results = run_kmeans_pipeline(x_data, y_data, puuids)
+
+    # ── LSTM only ─────────────────────────────────────────────────────────────
+    elif RUN_MODE == "LSTM":
+        x_data, y_data, puuids = load_data()
+        lstm_results, lstm_games, lstm_thresholds = run_lstm_pipeline(x_data, y_data, puuids)
+
+    # ── BOTH — run everything fresh then compare ──────────────────────────────
+    elif RUN_MODE == "BOTH":
+        x_data, y_data, puuids = load_data()
+        lstm_results, lstm_games, lstm_thresholds = run_lstm_pipeline(x_data, y_data, puuids)
+        kmeans_results = run_kmeans_pipeline(x_data, y_data, puuids)
+        compare_and_report(lstm_results, lstm_games, lstm_thresholds, kmeans_results)
+
+    else:
+        raise ValueError(
+            f"Unknown RUN_MODE '{RUN_MODE}'. "
+            "Choose one of: 'BOTH', 'LSTM', 'KMEANS', 'COMPARE'"
+        )
