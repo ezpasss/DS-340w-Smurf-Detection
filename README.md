@@ -4,7 +4,7 @@ This model is designed to detect player anomalies or smurfs in the game League o
 
 ## 📁 Project Structure
 - `Full.py`: The main execution script.
-- `cut_model.keras`, `pool_model.keras`, `raw_model.keras`: Pre-trained models used to save training time.
+- `cut_model.keras`, `pool_model.keras`, `raw_model.keras`: Pre-trained models used to save training time found in the models folder.
 - `Data_Editing.py` / `import_scraper.py`: Scripts used for data collection and preparation (Reference only).
 
 ## 📊 Data Access
