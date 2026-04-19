@@ -16,7 +16,9 @@ The required NumPy datasets are hosted on Google Drive due to their size.
 ### 1. Prerequisites
 Ensure you have the environment set up with all necessary packages. Use the provided environment file: requirements.txt
 Go into the correct directory in terminal then use the command:
+
 pip install -r requirements.txt
+
 To install the correct packages
 
 ### 2. File Setup & Preparation
