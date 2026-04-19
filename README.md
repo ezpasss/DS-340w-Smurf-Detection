@@ -24,6 +24,10 @@ To run the code, you must organize the files into a single directory:
 3.  **Scripts:** Ensure `Full.py` is in that same folder.
 
 ### 3. Running the Code
+
+**Performance Note:** This code can be computationally intensive and may require significant processing time depending on your hardware specifications. Please ensure your system has adequate resources available before execution.
+
+
 Once your folder contains the models, scripts, and the two `.npy` data files, execute the application:
 
 ```bash
